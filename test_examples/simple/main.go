@@ -2,9 +2,11 @@ package main
 
 import (
 	"bufio"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 
 	jumpboot "github.com/richinsley/jumpboot/pkg"
@@ -21,21 +23,23 @@ func main() {
 		fmt.Printf("Error creating environment: %v\n", err)
 		return
 	}
-	fmt.Printf("Created environment: %s\n", env.Name)
-
-	// installing mlx with micromamba
-	err = env.MicromambaInstallPackage("debugpy", "conda-forge")
-	if err != nil {
-		fmt.Printf("Error installing debugpy: %v\n", err)
-		os.Exit(1)
+	// check if this is a new jumpboot environment and install packages
+	if env.IsNew {
+		// we'll install debugpy as an example (we could also use pip)
+		err = env.MicromambaInstallPackage("debugpy", "conda-forge")
+		if err != nil {
+			fmt.Printf("Error installing debugpy: %v\n", err)
+			os.Exit(1)
+		}
 	}
+	fmt.Printf("Created environment: %s\n", env.Name)
 
 	// Create a Python process with unbuffered stdin/stdout
 	// The script reads from stdin and writes to stdout
-	script := `
+	main_script := `
 import sys
 
-# print the args.  With the bootstrap loader, the first arg is "-c" and arg[1..n] are the script arguments
+# print the args
 print(sys.argv)
 
 while True:
@@ -51,7 +55,27 @@ while True:
 print("Python script ending")
 `
 
-	pyProcess, err := env.NewPythonProcessFromString(script, nil, nil, false, "foo", "bar")
+	binpath := path.Join(cwd, "bin")
+
+	// Define a Python program with a main program
+	// we could add additional embedded modules and packages here
+	program := &jumpboot.PythonProgram{
+		Name: "SimpleProgram",
+		Path: binpath,
+		Program: jumpboot.Module{
+			Name:   "__main__",
+			Path:   path.Join(binpath, "main.py"),
+			Source: base64.StdEncoding.EncodeToString([]byte(main_script)),
+		},
+		Modules: []jumpboot.Module{},
+	}
+
+	// create a string map of env options
+	envOptions := map[string]string{
+		// "PYTHONNOFROZENMODULES": "1",
+	}
+
+	pyProcess, err := env.NewPythonProcessFromProgram(program, envOptions, nil, false)
 	if err != nil {
 		panic(err)
 	}
@@ -75,7 +99,8 @@ print("Python script ending")
 	io.WriteString(pyProcess.Stdin, "Test input\n")
 	io.WriteString(pyProcess.Stdin, "exit\n")
 
-	// Read output from the Python script
+	// Copy stdout and stderr output from the Python script
+	// to the golang process stdout and stderr
 	go func() {
 		io.Copy(os.Stdout, pyProcess.Stdout)
 	}()

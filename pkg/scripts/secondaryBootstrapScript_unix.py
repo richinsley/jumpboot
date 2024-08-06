@@ -85,10 +85,9 @@ extra_file_count = int(sys.argv[1])
 
 # get the extra file descriptors, they will be 6..
 extra_file_descriptors = [int(sys.argv[6 + i]) for i in range(extra_file_count - 4)]
-# extra_file_descriptors = [int(sys.argv[2 + i]) for i in range(extra_file_count)]
 
 # truncate sys.argv to just the arguments and prepend the executable name
-sys.argv = ["pyingo.py"] + sys.argv[2 + extra_file_count:]
+sys.argv = ["jumpboot.py"] + sys.argv[2 + extra_file_count:]
 
 # add the extra file descriptors to the sys module
 sys.__dict__['extra_file_descriptors'] = extra_file_descriptors
