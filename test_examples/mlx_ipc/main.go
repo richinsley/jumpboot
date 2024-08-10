@@ -76,7 +76,7 @@ func main() {
 	// create a string map of env options to pass to the Python process
 	envOptions := map[string]string{}
 
-	pyProcess, err := env.NewPythonProcessFromProgram(program, envOptions, nil, false)
+	pyProcess, _, err := env.NewPythonProcessFromProgram(program, envOptions, nil, false)
 	if err != nil {
 		panic(err)
 	}

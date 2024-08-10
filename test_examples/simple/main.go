@@ -75,7 +75,7 @@ print("Python script ending")
 		// "PYTHONNOFROZENMODULES": "1",
 	}
 
-	pyProcess, err := env.NewPythonProcessFromProgram(program, envOptions, nil, false)
+	pyProcess, _, err := env.NewPythonProcessFromProgram(program, envOptions, nil, false)
 	if err != nil {
 		panic(err)
 	}

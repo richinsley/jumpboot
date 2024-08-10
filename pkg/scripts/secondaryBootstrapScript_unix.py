@@ -3,115 +3,236 @@ import sys
 import json
 import base64
 import importlib
-import importlib.util
+import linecache
+from importlib.abc import Loader, MetaPathFinder
+from importlib.util import spec_from_file_location
 
-def check_module_flags(module_name):
-    module = importlib.import_module(module_name)
-    spec = module.__spec__
-    if spec:
-        print(f"Module {module_name} flags:")
-        print(f"  - Is frozen: {getattr(spec, '_frozen', False)}")
-        print(f"  - Is built-in: {spec.origin == 'built-in'}")
-        print(f"  - Origin: {spec.origin}")
-        print(f"  - Has location: {spec.has_location}")
-    else:
-        print(f"No spec found for module {module_name}")
+def debug_out(msg):
+    # print(msg, file=sys.Pipe_out)
+    pass
 
-def load_module(name, path, source):
-    module_content = base64.b64decode(source).decode('utf-8')
-    spec = importlib.util.spec_from_loader(name, loader=None)
-    # spec = importlib.util.spec_from_file_location(name, path)
-    module = importlib.util.module_from_spec(spec)
-    module.__file__ = path
-    module.__spec__.origin = path
-    module.__spec__.has_location = True
+def initialize_packages(modules):
+    for name, module_info in modules.items():
+        if '.' not in name and module_info['Path'].endswith('__init__.py'):
+            debug_out(f"Initializing package: {name}")
+            importlib.import_module(name)
 
-    # Cache the source code in the module
-    module.__dict__['__cached_source__'] = module_content
-    exec(module_content, module.__dict__)
-    sys.modules[name] = module
-    # check_module_flags(name)
-    return module
+def print_program_structure(modules):
+    def print_package(name, package, indent=""):
+        debug_out(f"{indent}{name}/")
+        for module in package.get('Modules', []):
+            debug_out(f"{indent}  {module['Name']}")
+        for sub_name, sub_package in package.get('Packages', {}).items():
+            print_package(sub_name, sub_package, indent + "  ")
 
-def load_package(package, parent_name=''):
-    package_name = f"{parent_name}.{package['Name']}" if parent_name else package['Name']
-    package_path = package['Path']
-    package_module = importlib.util.module_from_spec(
-        importlib.util.spec_from_loader(package_name, loader=None)
-    )
-    package_module.__path__ = [package_path]
-    sys.modules[package_name] = package_module
+    debug_out("Loaded Program Structure:")
+    for name, module in modules.items():
+        if '.' not in name:  # Top-level modules and packages
+            if isinstance(module, dict) and 'Packages' in module:
+                print_package(name, module)
+            else:
+                debug_out(f"{name}")
 
-    # Load modules in this package
-    if 'Modules' in package:
-        for module in package['Modules']:
-            module_name = module['Name'].split('.')[0]  # Remove .py extension if present
-            full_module_name = f"{package_name}.{module_name}"
-            loaded_module = load_module(full_module_name, module['Path'], module['Source'])
-            setattr(package_module, module_name, loaded_module)
+class CustomFinder(MetaPathFinder):
+    def __init__(self, modules):
+        self.modules = modules
+        self.loaded_modules = {}
 
-    # Recursively load sub-packages
-    if 'Packages' in package and package['Packages']:
-        for sub_package in package['Packages']:
-            sub_package_module = load_package(sub_package, package_name)
-            sub_package_name = sub_package['Name']
-            setattr(package_module, sub_package_name, sub_package_module)
+    def find_spec(self, fullname, path, target=None):
+        debug_out(f"Attempting to find spec for: {fullname}")
+        debug_out(f"Search path: {path}")
+        
+        # Check if it's a module we know about
+        if fullname in self.modules:
+            debug_out(f"Found module: {fullname}")
+            return self._create_spec(fullname)
+        
+        # Check if it's a name within a module we've already loaded
+        parts = fullname.split('.')
+        debug_out(f"Parts: {parts}")
+        
+        # Try to load parent modules if they haven't been loaded yet
+        for i in range(1, len(parts)):
+            parent_name = '.'.join(parts[:i])
+            if parent_name not in self.loaded_modules and parent_name in self.modules:
+                self._load_module(parent_name)
+        
+        # Now check for the attribute in loaded modules
+        for i in range(1, len(parts)):
+            parent_name = '.'.join(parts[:i])
+            child_name = '.'.join(parts[i:])
+            debug_out(f"Checking {child_name} in {parent_name}")
+            
+            if parent_name in self.loaded_modules:
+                parent_module = self.loaded_modules[parent_name]
+                
+                # Check if the child is an attribute of the parent module
+                if hasattr(parent_module, child_name):
+                    debug_out(f"Found {child_name} in {parent_name}")
+                    return None  # Let Python's default import mechanism handle it
+        
+        debug_out(f"Module not found: {fullname}")
+        return None
 
-    return package_module
+    def _create_spec(self, fullname):
+        debug_out(f"Creating spec for module: {fullname}")
+        module_info = self.modules[fullname]
+        source = base64.b64decode(module_info['Source']).decode('utf-8')
+        loader = CustomLoader(source, module_info['Path'], fullname, self)
+        spec = spec_from_file_location(fullname, module_info['Path'], loader=loader)
+        
+        if module_info['Path'].endswith('__init__.py'):
+            spec.submodule_search_locations = [os.path.dirname(module_info['Path'])]
+        
+        return spec
+
+    def _load_module(self, fullname):
+        if fullname not in self.modules:
+            raise ImportError(f"No module named '{fullname}'")
+        
+        spec = self._create_spec(fullname)
+        module = importlib.util.module_from_spec(spec)
+        self.loaded_modules[fullname] = module
+        spec.loader.exec_module(module)
+        return module
+
+class CustomLoader(Loader):
+    def __init__(self, source, path, fullname, finder):
+        self.source = source
+        self.path = path
+        self.fullname = fullname
+        self.finder = finder
+
+    def create_module(self, spec):
+        return None
+
+    def exec_module(self, module):
+        debug_out(f"Executing module: {self.fullname}")
+        
+        # Set up module attributes
+        module.__dict__['__cached_source__'] = self.source
+        # module.__file__ = self.path <- This is not needed for in-memory files
+        if self.fullname == '__main__':
+            module.__package__ = ''
+        elif '.' in self.fullname:
+            module.__package__ = '.'.join(self.fullname.split('.')[:-1])
+        else:
+            module.__package__ = self.fullname
+
+        if self.path.endswith('__init__.py'):
+            module.__path__ = [os.path.dirname(self.path)]
+
+        # Create a proper spec for the module
+        spec = importlib.util.spec_from_file_location(self.fullname, self.path, loader=self)
+        module.__spec__ = spec
+
+        # Support debugging For in-memory files by adding the source to linecache
+        unique_filename = f"<{self.fullname}>"
+        linecache.cache[unique_filename] = (
+            len(self.source),
+            None,
+            self.source.splitlines(True),
+            unique_filename,
+        )
+        compiled = compile(self.source, unique_filename, 'exec', dont_inherit=True)
+
+        # Execute the compiled code
+        exec(compiled, module.__dict__)
+        
+        self.finder.loaded_modules[self.fullname] = module
+        
+        debug_out(f"Finished executing module: {self.fullname}")
+
+def load_program_data(program_data):
+    modules = {}
+    
+    def process_package(package, parent_name=''):
+        package_name = f"{parent_name}.{package['Name']}" if parent_name else package['Name']
+        
+        # Add __init__.py for each package
+        init_module = next((m for m in package.get('Modules', []) if m['Name'] == '__init__.py'), None)
+        if init_module:
+            modules[package_name] = init_module
+        else:
+            modules[package_name] = {
+                'Name': '__init__.py',
+                'Path': os.path.join(package['Path'], '__init__.py'),
+                'Source': base64.b64encode(b'').decode('utf-8')
+            }
+        
+        if 'Modules' in package and package['Modules'] is not None:
+            for module in package['Modules']:
+                if module['Name'] != '__init__.py':
+                    module_name = f"{package_name}.{module['Name'].split('.')[0]}"
+                    modules[module_name] = module
+
+        if 'Packages' in package and package['Packages'] is not None:
+            for sub_package in package['Packages']:
+                process_package(sub_package, package_name)
+
+    if 'Packages' in program_data and program_data['Packages'] is not None:
+        for package in program_data['Packages']:
+            process_package(package)
+
+    if 'Modules' in program_data and program_data['Modules'] is not None:
+        for module in program_data['Modules']:
+            modules[module['Name']] = module
+
+    modules[program_data['Program']['Name']] = program_data['Program']
+
+    return modules
 
 # Read program data from the second pipe
 fd_program = int(sys.argv[3])
-f_program = os.fdopen(fd_program, 'r')
-program_data_json = f_program.read()
-f_program.close()
+with sys.__jbo(fd_program, 'r') as f_program:
+    program_data = json.loads(f_program.read())
 
-# create the primary pipe in/ pipe out
-# the pipe python will write to is sys.argv[4]
-# the pipe python will read from is sys.argv[5]
-fd_out = int(sys.argv[4])
-fd_in = int(sys.argv[5])
-f_out = os.fdopen(fd_out, 'w')
-f_in = os.fdopen(fd_in, 'r')
+# Set up pipes
+fd_out = program_data['PipeOut']
+fd_in = program_data['PipeIn']
+f_out = sys.__jbo(fd_out, 'w')
+f_in = sys.__jbo(fd_in, 'r')
 
-# attach the pipes to sys.Pipe_in and sys.Pipe_out
-sys.__dict__['Pipe_in'] = f_in
-sys.__dict__['Pipe_out'] = f_out
+# Attach pipes to sys.Pipe_in and sys.Pipe_out
+sys.Pipe_in = f_in
+sys.Pipe_out = f_out
 
-# at this point sys.argv is:
-# ['-c','(int)extra_file_count', '(int)fd_bootstrap', '(int)fd_program', '(int)fd_out', '(int)fd_int', '(int)extrafile_1', 'extrafile_n', 'args'...]
-
-# get the extra file count
+# Process extra file descriptors
 extra_file_count = int(sys.argv[1])
+extra_file_descriptors = [int(sys.argv[4 + i]) for i in range(extra_file_count - 2)]
+sys.extra_file_descriptors = extra_file_descriptors
 
-# get the extra file descriptors, they will be 6..
-extra_file_descriptors = [int(sys.argv[6 + i]) for i in range(extra_file_count - 4)]
+# show the length of  extra file descriptors are passed
+print(f"Extra file descriptors: {len(sys.extra_file_descriptors)}")
 
-# truncate sys.argv to just the arguments and prepend the executable name
-sys.argv = ["jumpboot.py"] + sys.argv[2 + extra_file_count:]
+# Adjust sys.argv
+sys.argv = ["pyingo.py"] + sys.argv[2 + extra_file_count:]
 
-# add the extra file descriptors to the sys module
-sys.__dict__['extra_file_descriptors'] = extra_file_descriptors
+# Process program data
+modules = load_program_data(program_data)
 
-# Parse the JSON data
-program_data = json.loads(program_data_json)
+# Create an instance of CustomFinder
+custom_finder = CustomFinder(modules)
 
-# Load packages if present
-if 'Packages' in program_data and program_data['Packages'] is not None:
-    for package in program_data['Packages']:
-        load_package(package)
+# Add the custom finder to sys.meta_path
+sys.meta_path.insert(0, custom_finder)
 
-# Load additional modules if present
-if 'Modules' in program_data and program_data['Modules'] is not None:
-    for module in program_data['Modules']:
-        load_module(module['Name'], module['Path'], module['Source'])
-    
-# Load the main program
-main_module = load_module(program_data['Program']['Name'],
-                          program_data['Program']['Path'],
-                          program_data['Program']['Source'])
+# Handle main program
+main_module_name = program_data['Program']['Name']
+main_module_info = modules[main_module_name]
+main_source = base64.b64decode(main_module_info['Source']).decode('utf-8')
 
-# Set up and run the main module
-if program_data['Program']['Name'] == '__main__':
-    # Set up __main__ as it would be if this script was run directly
-    sys.modules['__main__'] = main_module
-    main_module.__name__ = '__main__'
+# Load all top-level packages
+for name in modules:
+    if '.' not in name and name != main_module_name:
+        custom_finder._load_module(name)
+
+# Now load and execute the main module
+main_module_info = modules[main_module_name]
+main_source = base64.b64decode(main_module_info['Source']).decode('utf-8')
+
+loader = CustomLoader(main_source, main_module_info['Path'], '__main__', custom_finder)
+spec = importlib.util.spec_from_file_location('__main__', main_module_info['Path'], loader=loader)
+main_module = importlib.util.module_from_spec(spec)
+sys.modules['__main__'] = main_module
+loader.exec_module(main_module)

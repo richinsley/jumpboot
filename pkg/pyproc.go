@@ -12,10 +12,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"text/template"
 	"time"
 )
+
+//go:embed packages/jumpboot/*.py
+var jumpboot_package embed.FS
 
 // PythonProcess represents a running Python process with its I/O pipes
 type PythonProcess struct {
@@ -28,6 +32,7 @@ type PythonProcess struct {
 	script  io.WriteCloser // For writing the secondary bootstrap script
 }
 
+// Module represents a Python module
 type Module struct {
 	// Name of the module
 	Name string
@@ -37,6 +42,7 @@ type Module struct {
 	Source string
 }
 
+// Package represents a Python package
 type Package struct {
 	// Name of the package
 	Name string
@@ -48,12 +54,15 @@ type Package struct {
 	Packages []Package
 }
 
+// PythonProgram represents a Python program with its main module and packages
 type PythonProgram struct {
 	Name     string
 	Path     string
 	Program  Module
 	Packages []Package
 	Modules  []Module
+	PipeIn   int
+	PipeOut  int
 }
 
 // Data struct to hold the pipe number
@@ -81,13 +90,19 @@ func NewModuleFromPath(name, path string) (*Module, error) {
 
 // NewModuleFromString creates a new module from a string
 func NewModuleFromString(name, original_path string, source string) *Module {
+	// Trim the "packages/" prefix if it exists
+	path := original_path
+	// if filepath.HasPrefix(path, "packages/") {
+	// 	path = filepath.Join(filepath.Base(filepath.Dir(path)), filepath.Base(path))
+	// }
+
 	// base64 encode the source
 	encoded := base64.StdEncoding.EncodeToString([]byte(source))
 
 	return &Module{
 		Name:   name,
 		Source: encoded,
-		Path:   original_path,
+		Path:   path,
 	}
 }
 
@@ -192,26 +207,37 @@ func procTemplate(templateStr string, data interface{}) string {
 	return result.String()
 }
 
-func (env *Environment) NewPythonProcessFromProgram(program *PythonProgram, environment_vars map[string]string, extrafiles []*os.File, debug bool, args ...string) (*PythonProcess, error) {
-	// Create two pipes
+func (env *Environment) NewPythonProcessFromProgram(program *PythonProgram, environment_vars map[string]string, extrafiles []*os.File, debug bool, args ...string) (*PythonProcess, []byte, error) {
+	// create the jumpboot package
+	jumpboot_package, err := newPackageFromFS("jumpboot", "jumpboot", "packages/jumpboot", jumpboot_package)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// prepend the jumpboot package to the list of packages
+	program.Packages = append([]Package{*jumpboot_package}, program.Packages...)
+
+	// Create two pipes for the bootstrap and the program data
+	// these are closed after the data is written
 	reader_bootstrap, writer_bootstrap, err := os.Pipe()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	reader_program, writer_program, err := os.Pipe()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// Create two pipes for the primary input and output of the script
+	// these are used to communicate with the primary bootstrap script
 	pipein_reader_primary, pipein_writer_primary, err := os.Pipe()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	pipeout_reader_primary, pipeout_writer_primary, err := os.Pipe()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// get the file descriptor for the bootstrap script
@@ -219,13 +245,17 @@ func (env *Environment) NewPythonProcessFromProgram(program *PythonProgram, envi
 	primaryBootstrapScript := procTemplate(primaryBootstrapScriptTemplate, TemplateData{PipeNumber: int(reader_bootstrap_fd)})
 
 	// Create the command with the primary bootstrap script
-	// fullArgs := append([]string{"-u", "-c", primaryBootstrapScript}, args...)
-	// cmd := exec.Command(env.PythonPath, fullArgs...)
 	cmd := exec.Command(env.PythonPath)
 
 	// Pass both file descriptors using ExtraFiles
 	// this will return a list of strings with the file descriptors
-	extradescriptors := setExtraFiles(cmd, append([]*os.File{reader_bootstrap, reader_program, pipein_writer_primary, pipeout_reader_primary}, extrafiles...))
+	extradescriptors := setExtraFiles(cmd, append([]*os.File{pipein_writer_primary, pipeout_reader_primary, reader_bootstrap, reader_program}, extrafiles...))
+
+	// truncate pipein_writer_primary, pipeout_reader_primary from extradescriptors
+	// these are available as PipeIn and PipeOut in the PythonProgram struct
+	program.PipeOut, _ = strconv.Atoi(extradescriptors[0])
+	program.PipeIn, _ = strconv.Atoi(extradescriptors[1])
+	extradescriptors = extradescriptors[2:]
 
 	// At this point, cmd.Args will contain just the python path.  We can now append the "-c" flag and the primary bootstrap script
 	cmd.Args = append(cmd.Args, "-u", "-c", primaryBootstrapScript)
@@ -250,26 +280,26 @@ func (env *Environment) NewPythonProcessFromProgram(program *PythonProgram, envi
 	// Create pipes for the input, output, and error of the script
 	stdinPipe, err := cmd.StdinPipe()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	stderrPipe, err := cmd.StderrPipe()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// Prepare the program data
 	programData, err := json.Marshal(program)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// Start the command
 	if err := cmd.Start(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// Write the secondary bootstrap script and program data to separate pipes
@@ -296,7 +326,7 @@ func (env *Environment) NewPythonProcessFromProgram(program *PythonProgram, envi
 	// Set up signal handling
 	setupSignalHandler(pyProcess)
 
-	return pyProcess, nil
+	return pyProcess, programData, nil
 }
 
 // NewPythonProcessFromString starts a Python script from a string with the given arguments.
