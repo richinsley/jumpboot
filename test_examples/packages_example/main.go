@@ -15,6 +15,7 @@ import (
 
 // ensure to embed '*.py' files in the packages directory to be included in the final binary
 //
+//go:embed packages/math_operations/__init__.py
 //go:embed packages/math_operations/*.py
 var math_operations embed.FS
 

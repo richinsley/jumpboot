@@ -2,7 +2,7 @@
 import sys
 from math_operations import add, subtract, multiply, divide
 from tabulate import tabulate
-import debugpy
+# import debugpy
 import os
 import jumpboot
 

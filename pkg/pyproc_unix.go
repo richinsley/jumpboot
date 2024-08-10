@@ -13,14 +13,6 @@ import (
 	"syscall"
 )
 
-// The file descriptor is passed as an extra file, so it will be after stderr
-//
-//go:embed scripts/bootstrap_unix.py
-var primaryBootstrapScriptTemplate string
-
-//go:embed scripts/secondaryBootstrapScript_unix.py
-var secondaryBootstrapScriptTemplate string
-
 func setSignalsForChannel(c chan os.Signal) {
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
 }
