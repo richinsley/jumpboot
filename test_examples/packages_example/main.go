@@ -15,7 +15,6 @@ import (
 
 // ensure to embed '*.py' files in the packages directory to be included in the final binary
 //
-//go:embed packages/math_operations/__init__.py
 //go:embed packages/math_operations/*.py
 var math_operations embed.FS
 
@@ -100,6 +99,13 @@ func main() {
 		fmt.Println("Error reading from Python process: ", err)
 	}
 	fmt.Println("Python process says: ", string(b))
+
+	// create a json string to send to the Python process
+	jsonString := `{"message": "Hello from Go!"}`
+	_, err = pyProcess.PipeOut.Write([]byte(jsonString + "\n"))
+	if err != nil {
+		fmt.Println("Error writing to Python process: ", err)
+	}
 
 	// Wait for the Python process to finish
 	pyProcess.Cmd.Wait()

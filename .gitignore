@@ -27,3 +27,4 @@ comfyui/
 genctags/micromamba
 genctags/pycparser
 test_examples/environments/
+pkg/examples/environments/

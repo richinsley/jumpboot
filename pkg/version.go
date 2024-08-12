@@ -12,6 +12,8 @@ type Version struct {
 }
 
 // ParseVersion parses a version string in the format "X.Y.Z" and returns a Version object.
+// If the version string is not in the format "X.Y.Z", it will try parsing it as "X.Y" or "X".
+// Any additional characters after the version string will be ignored.
 func ParseVersion(versionStr string) (Version, error) {
 	version := Version{
 		Minor: -1,
@@ -28,6 +30,9 @@ func ParseVersion(versionStr string) (Version, error) {
 				return Version{}, fmt.Errorf("error parsing version: %v", err)
 			}
 		}
+	}
+	if version.Major < 0 || version.Minor < -1 || version.Patch < -1 {
+		return Version{}, fmt.Errorf("invalid version: %s", versionStr)
 	}
 	return version, nil
 }
