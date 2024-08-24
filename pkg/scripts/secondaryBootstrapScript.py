@@ -203,7 +203,7 @@ extra_file_descriptors = [int(sys.argv[4 + i]) for i in range(extra_file_count -
 sys.extra_file_descriptors = extra_file_descriptors
 
 # show the length of  extra file descriptors are passed
-print(f"Extra file descriptors: {len(sys.extra_file_descriptors)}")
+debug_out(f"Extra file descriptors: {len(sys.extra_file_descriptors)}")
 
 # Adjust sys.argv
 sys.argv = ["pyingo.py"] + sys.argv[2 + extra_file_count:]

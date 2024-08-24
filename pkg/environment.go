@@ -3,15 +3,12 @@ package pkg
 import (
 	"bufio"
 	"fmt"
-	"io"
 	"io/fs"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
-
-	"github.com/schollz/progressbar/v3"
+	"strings"
 )
 
 type Environment struct {
@@ -32,8 +29,21 @@ type Environment struct {
 	IsNew             bool    // Whether the environment was newly created
 }
 
+type VenvOptions struct {
+	SystemSitePackages bool
+	Symlinks           bool
+	Copies             bool
+	Clear              bool
+	Upgrade            bool
+	WithoutPip         bool
+	Prompt             string
+	UpgradeDeps        bool
+}
+
 // user feedback options for CreateEnvironment
 type CreateEnvironmentOptions int
+
+type ProgressCallback func(message string, current, total int64)
 
 const (
 	// Show progress bar
@@ -46,7 +56,7 @@ const (
 	ShowNothing
 )
 
-func CreateEnvironment(envName string, rootDir string, pythonVersion string, channel string, feedback CreateEnvironmentOptions) (*Environment, error) {
+func CreateEnvironment(envName string, rootDir string, pythonVersion string, channel string, progressCallback ProgressCallback) (*Environment, error) {
 	if pythonVersion == "" {
 		pythonVersion = "3.10"
 	}
@@ -99,13 +109,13 @@ func CreateEnvironment(envName string, rootDir string, pythonVersion string, cha
 		MicromambaPath: filepath.Join(binDirectory, executableName),
 	}
 
-	// Check if binDirectory already has micromamba by getting it's version
+	// Check if binDirectory already has micromamba by getting its version
 	mver, err := RunReadStdout(env.MicromambaPath, "micromamba", "--version")
 	if err != nil {
 		_, ok := err.(*fs.PathError)
 		if ok {
 			// download micromamba if it doesn't exist
-			env.MicromambaPath, err = ExpectMicromamba(binDirectory, feedback)
+			env.MicromambaPath, err = ExpectMicromamba(binDirectory, progressCallback)
 			if err != nil {
 				return nil, fmt.Errorf("error downloading micromamba: %v", err)
 			}
@@ -130,16 +140,12 @@ func CreateEnvironment(envName string, rootDir string, pythonVersion string, cha
 		env.IsNew = true
 
 		// Create a new Python environment with micromamba
-		var createEnvCmd *exec.Cmd = nil
 		cmdargs := []string{"--root-prefix", env.RootDir, "create", "-n", env.Name, "python=" + pythonVersion, "-y"}
 		if channel != "" {
 			cmdargs = append(cmdargs, "-c", channel)
 		}
 
-		createEnvCmd = exec.Command(env.MicromambaPath, cmdargs...)
-
-		// createEnvCmd.Stdout = os.Stdout
-		// createEnvCmd.Stderr = os.Stderr
+		createEnvCmd := exec.Command(env.MicromambaPath, cmdargs...)
 		createEnvCmd.Env = append(os.Environ(), "MAMBA_ROOT_PREFIX="+env.RootDir)
 
 		stdout, err := createEnvCmd.StdoutPipe()
@@ -148,42 +154,25 @@ func CreateEnvironment(envName string, rootDir string, pythonVersion string, cha
 		}
 		defer stdout.Close()
 
-		var bar *progressbar.ProgressBar = nil
-
-		if feedback == ShowProgressBar || feedback == ShowProgressBarVerbose {
-			bar = progressbar.NewOptions(-1,
-				progressbar.OptionEnableColorCodes(true),
-				progressbar.OptionShowBytes(false),
-				progressbar.OptionSetWidth(15),
-				progressbar.OptionSetDescription("Creating Python environment..."),
-				progressbar.OptionSetTheme(progressbar.Theme{
-					Saucer:        "[green]=[reset]",
-					SaucerHead:    "[green]>[reset]",
-					SaucerPadding: " ",
-					BarStart:      "[",
-					BarEnd:        "]",
-				}))
-		}
-
-		// continue to read the output until there is no more
-		// or an error occurs
 		if err := createEnvCmd.Start(); err != nil {
 			return nil, err
 		}
+
 		scanner := bufio.NewScanner(stdout)
+		lineCount := 0
 		for scanner.Scan() {
-			if bar != nil {
-				// we'll use lines to update the progress bar to show we are working
-				bar.Add(1)
-			}
-			if feedback == ShowVerbose || feedback == ShowProgressBarVerbose {
-				fmt.Println(scanner.Text())
+			lineCount++
+			if progressCallback != nil {
+				progressCallback("Creating Python environment...", int64(lineCount), -1)
 			}
 		}
 
-		if bar != nil {
-			bar.Finish()
-			fmt.Println()
+		if err := createEnvCmd.Wait(); err != nil {
+			return nil, fmt.Errorf("error creating environment: %v", err)
+		}
+
+		if progressCallback != nil {
+			progressCallback("Python environment created successfully", 100, 100)
 		}
 	}
 
@@ -216,8 +205,6 @@ func CreateEnvironment(envName string, rootDir string, pythonVersion string, cha
 	env.PythonHeadersPath = filepath.Join(env.RootDir, "envs", env.Name, "include", "python"+requestedVersion.MinorString())
 
 	// Check if the Python executable exists and get its version
-	// jumpboot\micromamba\envs\myenv3.10\bin\python.exe
-	// jumpboot\micromamba\envs\myenv3.10\python.exe
 	pver, err := RunReadStdout(env.PythonPath, "--version")
 	if err != nil {
 		return nil, fmt.Errorf("error running python --version: %v", err)
@@ -249,102 +236,310 @@ func CreateEnvironment(envName string, rootDir string, pythonVersion string, cha
 	return env, nil
 }
 
-func ExpectMicromamba(binFolder string, feedback CreateEnvironmentOptions) (string, error) {
-	// Detect platform and architecture
-	platform := runtime.GOOS
-	arch := runtime.GOARCH
-
-	// Convert platform and arch to match micromamba naming
-	var executableName string = "micromamba"
-	if platform == "darwin" {
-		platform = "osx"
-	} else if platform == "windows" {
-		platform = "win"
+func CreateEnvironmentFromSystem(progressCallback ProgressCallback) (*Environment, error) {
+	env := &Environment{
+		Name:    "system",
+		RootDir: "", // Will be set based on the system Python path
+		IsNew:   false,
 	}
 
-	switch arch {
-	case "amd64":
-		arch = "64"
-	case "arm64":
-		if platform == "win" {
-			// As of now, there is not a separate arm64 download for Windows
-			arch = "64"
-		}
-	default:
-		return "", fmt.Errorf("unsupported architecture: %s", arch)
+	// Find system Python
+	pythonCmd := "python"
+	if runtime.GOOS == "windows" {
+		pythonCmd = "python.exe"
 	}
 
-	// Construct the download URL
-	var downloadURL string
-	version := "" // Use this to specify a version, or leave empty for latest
-	// https://github.com/mamba-org/micromamba-releases/releases/download/1.5.7-0/micromamba-osx-arm64
-	if version == "" {
-		downloadURL = fmt.Sprintf("https://github.com/mamba-org/micromamba-releases/releases/latest/download/%s-%s-%s", executableName, platform, arch)
+	// Try to get Python path
+	pythonPath, err := exec.LookPath(pythonCmd)
+	if err != nil {
+		return nil, fmt.Errorf("system Python not found: %v", err)
+	}
+
+	env.PythonPath = pythonPath
+	env.RootDir = filepath.Dir(filepath.Dir(pythonPath))
+
+	if progressCallback != nil {
+		progressCallback("Found system Python", 10, 100)
+	}
+
+	// Get Python version
+	versionCmd := exec.Command(pythonPath, "--version")
+	versionOutput, err := versionCmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("error getting Python version: %v", err)
+	}
+
+	versionStr := strings.TrimSpace(string(versionOutput))
+	env.PythonVersion, err = ParsePythonVersion(versionStr)
+	if err != nil {
+		return nil, fmt.Errorf("error parsing Python version: %v", err)
+	}
+
+	if progressCallback != nil {
+		progressCallback("Got Python version", 20, 100)
+	}
+
+	// Get site-packages path
+	sitePackagesCmd := exec.Command(pythonPath, "-c", "import site; print(site.getsitepackages()[0])")
+	sitePackagesOutput, err := sitePackagesCmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("error getting site-packages path: %v", err)
+	}
+
+	env.SitePackagesPath = strings.TrimSpace(string(sitePackagesOutput))
+
+	if progressCallback != nil {
+		progressCallback("Got site-packages path", 30, 100)
+	}
+
+	// Get pip path
+	pipCmd := "pip"
+	if runtime.GOOS == "windows" {
+		pipCmd = "pip.exe"
+	}
+
+	env.PipPath, err = exec.LookPath(pipCmd)
+	if err != nil {
+		return nil, fmt.Errorf("pip not found: %v", err)
+	}
+
+	if progressCallback != nil {
+		progressCallback("Found pip", 40, 100)
+	}
+
+	// Get pip version
+	pipVersionCmd := exec.Command(env.PipPath, "--version")
+	pipVersionOutput, err := pipVersionCmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("error getting pip version: %v", err)
+	}
+
+	pipVersionStr := strings.TrimSpace(string(pipVersionOutput))
+	env.PipVersion, err = ParsePipVersion(pipVersionStr)
+	if err != nil {
+		return nil, fmt.Errorf("error parsing pip version: %v", err)
+	}
+
+	if progressCallback != nil {
+		progressCallback("Got pip version", 50, 100)
+	}
+
+	// Set other paths
+	env.EnvPath = env.RootDir
+	env.EnvBinPath = filepath.Dir(pythonPath)
+
+	// Get Python lib path
+	var libPathCmd string
+	if runtime.GOOS == "windows" {
+		libPathCmd = "import sys; print(sys.executable)"
 	} else {
-		downloadURL = fmt.Sprintf("https://github.com/mamba-org/micromamba-releases/releases/download/%s/%s-%s-%s", version, executableName, platform, arch)
+		libPathCmd = "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))"
 	}
 
-	// Ensure the target bin directory exists
-	if err := os.MkdirAll(binFolder, 0755); err != nil {
-		return "", fmt.Errorf("error creating directory: %v", err)
+	libPathCmdExec := exec.Command(pythonPath, "-c", libPathCmd)
+	libPathOutput, err := libPathCmdExec.Output()
+	if err != nil {
+		return nil, fmt.Errorf("error getting Python lib path: %v", err)
 	}
 
-	// Target binary path
-	if platform == "win" {
-		executableName += ".exe"
-	}
-	binpath := filepath.Join(binFolder, executableName)
-
-	if feedback == ShowVerbose || feedback == ShowProgressBarVerbose {
-		fmt.Printf("Downloading %s to %s\n", downloadURL, binpath)
+	env.PythonLibPath = strings.TrimSpace(string(libPathOutput))
+	if runtime.GOOS != "windows" {
+		env.PythonLibPath = filepath.Join(env.PythonLibPath, fmt.Sprintf("libpython%s.so", env.PythonVersion.MinorString()))
 	}
 
-	if feedback == ShowProgressBar || feedback == ShowProgressBarVerbose {
-		req, err := http.NewRequest("GET", downloadURL, nil)
-		if err != nil {
-			return "", fmt.Errorf("error creating request: %v", err)
+	if progressCallback != nil {
+		progressCallback("Got Python lib path", 60, 100)
+	}
+
+	// Get Python headers path
+	headersPathCmd := "import sysconfig; print(sysconfig.get_path('include'))"
+	headersPathCmdExec := exec.Command(pythonPath, "-c", headersPathCmd)
+	headersPathOutput, err := headersPathCmdExec.Output()
+	if err != nil {
+		return nil, fmt.Errorf("error getting Python headers path: %v", err)
+	}
+
+	env.PythonHeadersPath = strings.TrimSpace(string(headersPathOutput))
+
+	if progressCallback != nil {
+		progressCallback("Got Python headers path", 70, 100)
+	}
+
+	// Set EnvLibPath
+	env.EnvLibPath = filepath.Dir(env.PythonLibPath)
+
+	// Micromamba is not applicable for system Python, so we'll set these to empty
+	env.MicromambaPath = ""
+	env.MicromambaVersion = Version{}
+
+	if progressCallback != nil {
+		progressCallback("Environment setup complete", 100, 100)
+	}
+
+	return env, nil
+}
+
+func CreateVenvEnvironment(baseEnv *Environment, venvPath string, options VenvOptions, progressCallback ProgressCallback) (*Environment, error) {
+	if baseEnv == nil {
+		return nil, fmt.Errorf("base environment is nil")
+	}
+
+	// Check if the environment already exists
+	envExists := false
+	if _, err := os.Stat(venvPath); err == nil {
+		envExists = true
+	}
+
+	// Create a new Environment object
+	newEnv := &Environment{
+		Name:    filepath.Base(venvPath),
+		RootDir: venvPath,
+		IsNew:   !envExists || options.Clear, // Set IsNew if the env doesn't exist or if clear is true
+	}
+
+	// Prepare venv command arguments
+	args := []string{"-m", "venv"}
+
+	if options.SystemSitePackages {
+		args = append(args, "--system-site-packages")
+	}
+	if options.Symlinks {
+		args = append(args, "--symlinks")
+	}
+	if options.Copies {
+		args = append(args, "--copies")
+	}
+	if options.Clear {
+		args = append(args, "--clear")
+	}
+	if options.Upgrade {
+		args = append(args, "--upgrade")
+	}
+	if options.WithoutPip {
+		args = append(args, "--without-pip")
+	}
+	if options.Prompt != "" {
+		args = append(args, "--prompt", options.Prompt)
+	}
+	if options.UpgradeDeps {
+		args = append(args, "--upgrade-deps")
+	}
+
+	args = append(args, venvPath)
+
+	// Create or update the virtual environment
+	venvCmd := exec.Command(baseEnv.PythonPath, args...)
+	if err := venvCmd.Run(); err != nil {
+		return nil, fmt.Errorf("failed to create/update virtual environment: %v", err)
+	}
+
+	if progressCallback != nil {
+		if newEnv.IsNew {
+			progressCallback("Created virtual environment", 20, 100)
+		} else {
+			progressCallback("Updated virtual environment", 20, 100)
 		}
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			return "", fmt.Errorf("error downloading file: %v", err)
-		}
-		defer resp.Body.Close()
+	}
 
-		f, _ := os.OpenFile(binpath, os.O_CREATE|os.O_WRONLY, 0755)
-		defer f.Close()
-
-		bar := progressbar.DefaultBytes(
-			resp.ContentLength,
-			"Downloading micromamba",
-		)
-		io.Copy(io.MultiWriter(f, bar), resp.Body)
+	// Set paths based on the new virtual environment
+	if runtime.GOOS == "windows" {
+		newEnv.EnvBinPath = filepath.Join(venvPath, "Scripts")
+		newEnv.PythonPath = filepath.Join(newEnv.EnvBinPath, "python.exe")
+		newEnv.PipPath = filepath.Join(newEnv.EnvBinPath, "pip.exe")
 	} else {
-		// Download the binary
-		resp, err := http.Get(downloadURL)
-		if err != nil {
-			return "", fmt.Errorf("error downloading file: %v", err)
-		}
-		defer resp.Body.Close()
+		newEnv.EnvBinPath = filepath.Join(venvPath, "bin")
+		newEnv.PythonPath = filepath.Join(newEnv.EnvBinPath, "python")
+		newEnv.PipPath = filepath.Join(newEnv.EnvBinPath, "pip")
+	}
 
-		outFile, err := os.Create(binpath)
-		if err != nil {
-			return "", fmt.Errorf("error creating file: %v", err)
-		}
-		defer outFile.Close()
+	// Get Python version
+	versionCmd := exec.Command(newEnv.PythonPath, "--version")
+	versionOutput, err := versionCmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("error getting Python version: %v", err)
+	}
 
-		// Write the body to file
-		_, err = io.Copy(outFile, resp.Body)
+	versionStr := strings.TrimSpace(string(versionOutput))
+	newEnv.PythonVersion, err = ParsePythonVersion(versionStr)
+	if err != nil {
+		return nil, fmt.Errorf("error parsing Python version: %v", err)
+	}
+
+	if progressCallback != nil {
+		progressCallback("Got Python version", 40, 100)
+	}
+
+	// Get site-packages path
+	sitePackagesCmd := exec.Command(newEnv.PythonPath, "-c", "import site; print(site.getsitepackages()[0])")
+	sitePackagesOutput, err := sitePackagesCmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("error getting site-packages path: %v", err)
+	}
+
+	newEnv.SitePackagesPath = strings.TrimSpace(string(sitePackagesOutput))
+
+	if progressCallback != nil {
+		progressCallback("Got site-packages path", 60, 100)
+	}
+
+	// Get pip version (if pip is installed)
+	if !options.WithoutPip {
+		pipVersionCmd := exec.Command(newEnv.PipPath, "--version")
+		pipVersionOutput, err := pipVersionCmd.Output()
 		if err != nil {
-			return "", fmt.Errorf("error writing file: %v", err)
+			return nil, fmt.Errorf("error getting pip version: %v", err)
 		}
 
-		// Change file permissions to make it executable (not applicable for Windows)
-		if platform != "windows" {
-			if err := os.Chmod(binpath, 0755); err != nil {
-				return "", fmt.Errorf("error setting file permissions: %v", err)
-			}
+		pipVersionStr := strings.TrimSpace(string(pipVersionOutput))
+		newEnv.PipVersion, err = ParsePipVersion(pipVersionStr)
+		if err != nil {
+			return nil, fmt.Errorf("error parsing pip version: %v", err)
+		}
+
+		if progressCallback != nil {
+			progressCallback("Got pip version", 80, 100)
 		}
 	}
 
-	return binpath, nil
+	// Get Python lib path
+	var libPathCmd string
+	if runtime.GOOS == "windows" {
+		libPathCmd = "import sys; print(sys.executable)"
+	} else {
+		libPathCmd = "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))"
+	}
+
+	libPathCmdExec := exec.Command(newEnv.PythonPath, "-c", libPathCmd)
+	libPathOutput, err := libPathCmdExec.Output()
+	if err != nil {
+		return nil, fmt.Errorf("error getting Python lib path: %v", err)
+	}
+
+	newEnv.PythonLibPath = strings.TrimSpace(string(libPathOutput))
+	if runtime.GOOS != "windows" {
+		newEnv.PythonLibPath = filepath.Join(newEnv.PythonLibPath, fmt.Sprintf("libpython%s.so", newEnv.PythonVersion.MinorString()))
+	}
+
+	// Get Python headers path
+	headersPathCmd := "import sysconfig; print(sysconfig.get_path('include'))"
+	headersPathCmdExec := exec.Command(newEnv.PythonPath, "-c", headersPathCmd)
+	headersPathOutput, err := headersPathCmdExec.Output()
+	if err != nil {
+		return nil, fmt.Errorf("error getting Python headers path: %v", err)
+	}
+
+	newEnv.PythonHeadersPath = strings.TrimSpace(string(headersPathOutput))
+
+	// Set EnvLibPath
+	newEnv.EnvLibPath = filepath.Dir(newEnv.PythonLibPath)
+
+	// Micromamba is not applicable for venv, so we'll set these to empty
+	newEnv.MicromambaPath = ""
+	newEnv.MicromambaVersion = Version{}
+
+	if progressCallback != nil {
+		progressCallback("Virtual environment setup complete", 100, 100)
+	}
+
+	return newEnv, nil
 }

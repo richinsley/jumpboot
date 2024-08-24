@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path"
 	"path/filepath"
@@ -22,11 +23,19 @@ func main() {
 	cwd, _ := os.Getwd()
 	rootDirectory := filepath.Join(cwd, "..", "environments")
 	fmt.Println("Creating Jumpboot repo at: ", rootDirectory)
-	version := "3.12"
-	env, err := jumpboot.CreateEnvironment("myenv"+version, rootDirectory, version, "conda-forge", jumpboot.ShowNothing)
+	version := "3.11"
+
+	progressFunc := func(message string, current, total int64) {
+		if total > 0 {
+			fmt.Printf("\r%s: %.2f%%", message, float64(current)/float64(total)*100)
+		} else {
+			fmt.Printf("\r%s: %d", message, current)
+		}
+	}
+
+	env, err := jumpboot.CreateEnvironment("myenv"+version, rootDirectory, version, "conda-forge", progressFunc)
 	if err != nil {
-		fmt.Printf("Error creating environment: %v\n", err)
-		return
+		log.Fatalf("Error creating environment: %v", err)
 	}
 	fmt.Printf("Created environment: %s\n", env.Name)
 
@@ -34,7 +43,7 @@ func main() {
 		fmt.Println("Created a new environment")
 	}
 
-	env.PipInstallPackage("bson", "", "", false, jumpboot.ShowNothing)
+	env.PipInstallPackage("bson", "", "", false, progressFunc)
 	program := &jumpboot.PythonProgram{
 		Name: "MyProgram",
 		Path: cwd,
