@@ -227,6 +227,14 @@ for name in modules:
     if '.' not in name and name != main_module_name:
         custom_finder._load_module(name)
 
+# get the "jumpboot" package
+jumpboot_package = importlib.import_module('jumpboot')
+
+if jumpboot_package is not None:
+    # process the the KVPairs.  Assign each key value pair to jumpboot package so that it is available as jumpboot.key
+    for key, value in program_data['KVPairs'].items():
+        setattr(jumpboot_package, key, value)
+
 # Now load and execute the main module
 main_module_info = modules[main_module_name]
 main_source = base64.b64decode(main_module_info['Source']).decode('utf-8')

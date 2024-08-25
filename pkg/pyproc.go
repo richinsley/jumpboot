@@ -71,6 +71,7 @@ type PythonProgram struct {
 	Modules  []Module
 	PipeIn   int
 	PipeOut  int
+	KVPairs  map[string]interface{}
 }
 
 // Data struct to hold the pipe number

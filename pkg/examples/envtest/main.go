@@ -10,18 +10,71 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	jumpboot "github.com/richinsley/jumpboot/pkg"
 )
 
 var main_program string = `
+import jumpboot
+import os
 import sys
 import requests
+from multiprocessing import shared_memory
 from io import BytesIO
 from pydub import AudioSegment
 from pydub.playback import play
 
+# Replace with your actual URL
+url = 'https://www.myinstants.com/media/sounds/dry-fart.mp3'
+
+# Download the audio file
+response = requests.get(url)
+audio_data = BytesIO(response.content)
+
+# Load the audio file into pydub
+audio = AudioSegment.from_file(audio_data, format="mp3")
+
+# Play the audio
+play(audio)
+
+name = jumpboot.SHARED_MEMORY_NAME
+size = jumpboot.SHARED_MEMORY_SIZE
+semname = jumpboot.SEMAPHORE_NAME
+
+############## semaphore
+sem = jumpboot.NamedSemaphore(semname)
+
+try:
+	print("Trying to acquire semaphore...")
+	# sem.acquire()
+	# print("Semaphore acquired")
+	
+	# Simulate some work
+	# time.sleep(2)
+	
+	print("Releasing semaphore")
+	sem.release()
+finally:
+	sem.close()
+
+############## shared buffer
+
+try:
+	# Attach to the existing shared memory segment
+	shm = shared_memory.SharedMemory(name=name, create=False, size=size)
+	
+	# Read data from the shared memory
+	data = shm.buf[:].tobytes()
+	print(f"Data read from shared memory: {data.decode('utf-8')}")
+
+	# Close the shared memory segment
+	shm.close()
+except Exception as e:
+	print(f"Error: {e}")
+
+############## print info
 # print python system information
 print("\nPython Interpreter Information")
 print(sys.version)
@@ -38,20 +91,9 @@ print(sys.argv)
 print(sys.flags)
 print(sys.float_info)
 print(sys.float_repr_style)
+print(jumpboot.SHARED_MEMORY_NAME)
+
 print("exit")
-
-# Replace with your actual URL
-url = 'https://www.myinstants.com/media/sounds/dry-fart.mp3'
-
-# Download the audio file
-response = requests.get(url)
-audio_data = BytesIO(response.content)
-
-# Load the audio file into pydub
-audio = AudioSegment.from_file(audio_data, format="mp3")
-
-# Play the audio
-play(audio)
 `
 
 func main() {
@@ -68,8 +110,9 @@ func main() {
 		}
 	}
 
-	baseEnv, err := jumpboot.CreateEnvironmentFromSystem(progressFunc)
-	// env, err := jumpboot.CreateEnvironment("myenv"+version, rootDirectory, version, "conda-forge", progressFunc)
+	// baseEnv, err := jumpboot.CreateEnvironmentFromSystem(progressFunc)
+	version := "3.11"
+	baseEnv, err := jumpboot.CreateEnvironment("myenv"+version, rootDirectory, version, "conda-forge", progressFunc)
 	if err != nil {
 		log.Fatalf("Error creating environment: %v", err)
 	}
@@ -97,6 +140,34 @@ func main() {
 		env.PipInstallPackage("pydub", "", "", false, progressFunc)
 	}
 
+	// create a shared semaphore
+	semaphore_name := "/MySemaphore"
+	if runtime.GOOS == "windows" {
+		semaphore_name = "MySemaphore"
+	}
+	sem, err := jumpboot.NewSemaphore(semaphore_name, 0)
+	if err != nil {
+		log.Fatalf("Failed to create semaphore: %v", err)
+	}
+
+	// Create a shared memory segment
+	name := "my_shared_memory"
+	size := int32(1024)
+	segment, err := jumpboot.Create(name, size)
+	if err != nil {
+		log.Fatalf("Failed to create shared memory: %v", err)
+	}
+	defer segment.Close()
+
+	// Write some data to the shared memory
+	data := []byte("Hello from Go!")
+	_, err = segment.Write(data)
+	if err != nil {
+		log.Fatalf("Failed to write to shared memory: %v", err)
+	}
+
+	// Get the shared memory name and size
+
 	program := &jumpboot.PythonProgram{
 		Name: "MyProgram",
 		Path: cwd,
@@ -107,6 +178,7 @@ func main() {
 		},
 		Modules:  []jumpboot.Module{},
 		Packages: []jumpboot.Package{},
+		KVPairs:  map[string]interface{}{"SHARED_MEMORY_NAME": name, "SHARED_MEMORY_SIZE": size, "SEMAPHORE_NAME": semaphore_name},
 	}
 
 	// create a string map of env options to pass to the Python process
@@ -120,6 +192,11 @@ func main() {
 	go func() {
 		io.Copy(os.Stderr, pyProcess.Stderr)
 	}()
+
+	err = sem.Acquire()
+	if err != nil {
+		log.Fatalf("Failed to acquire semaphore: %v", err)
+	}
 
 	// Read the output line by line
 	scanner := bufio.NewScanner(pyProcess.Stdout)
