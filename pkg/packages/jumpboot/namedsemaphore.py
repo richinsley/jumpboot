@@ -16,23 +16,25 @@ class NamedSemaphore:
             raise OSError("Unsupported operating system")
 
     def _init_windows(self):
+        from ctypes import wintypes
+
         self.kernel32 = ctypes.windll.kernel32
         
         self.OpenSemaphore = self.kernel32.OpenSemaphoreW
-        self.OpenSemaphore.argtypes = [ctypes.wintypes.DWORD, ctypes.wintypes.BOOL, ctypes.wintypes.LPCWSTR]
-        self.OpenSemaphore.restype = ctypes.wintypes.HANDLE
+        self.OpenSemaphore.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR]
+        self.OpenSemaphore.restype = wintypes.HANDLE
 
         self.ReleaseSemaphore = self.kernel32.ReleaseSemaphore
-        self.ReleaseSemaphore.argtypes = [ctypes.wintypes.HANDLE, ctypes.wintypes.LONG, ctypes.POINTER(ctypes.wintypes.LONG)]
-        self.ReleaseSemaphore.restype = ctypes.wintypes.BOOL
+        self.ReleaseSemaphore.argtypes = [wintypes.HANDLE, wintypes.LONG, ctypes.POINTER(wintypes.LONG)]
+        self.ReleaseSemaphore.restype = wintypes.BOOL
 
         self.CloseHandle = self.kernel32.CloseHandle
-        self.CloseHandle.argtypes = [ctypes.wintypes.HANDLE]
-        self.CloseHandle.restype = ctypes.wintypes.BOOL
+        self.CloseHandle.argtypes = [wintypes.HANDLE]
+        self.CloseHandle.restype = wintypes.BOOL
 
         self.WaitForSingleObject = self.kernel32.WaitForSingleObject
-        self.WaitForSingleObject.argtypes = [ctypes.wintypes.HANDLE, ctypes.wintypes.DWORD]
-        self.WaitForSingleObject.restype = ctypes.wintypes.DWORD
+        self.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        self.WaitForSingleObject.restype = wintypes.DWORD
 
         self.SEMAPHORE_ALL_ACCESS = 0x1F0003
         self.INFINITE = 0xFFFFFFFF
