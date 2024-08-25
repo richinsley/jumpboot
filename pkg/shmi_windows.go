@@ -1,4 +1,4 @@
-package shm
+package pkg
 
 import (
 	"io"
