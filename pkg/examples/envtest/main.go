@@ -34,10 +34,10 @@ response = requests.get(url)
 audio_data = BytesIO(response.content)
 
 # Load the audio file into pydub
-audio = AudioSegment.from_file(audio_data, format="mp3")
+# audio = AudioSegment.from_file(audio_data, format="mp3")
 
 # Play the audio
-play(audio)
+# play(audio)
 
 name = jumpboot.SHARED_MEMORY_NAME
 size = jumpboot.SHARED_MEMORY_SIZE
