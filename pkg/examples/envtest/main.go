@@ -112,7 +112,7 @@ func main() {
 
 	// baseEnv, err := jumpboot.CreateEnvironmentFromSystem(progressFunc)
 	version := "3.11"
-	baseEnv, err := jumpboot.CreateEnvironment("myenv"+version, rootDirectory, version, "conda-forge", progressFunc)
+	baseEnv, err := jumpboot.CreateEnvironmentMamba("myenv"+version, rootDirectory, version, "conda-forge", progressFunc)
 	if err != nil {
 		log.Fatalf("Error creating environment: %v", err)
 	}

@@ -18,7 +18,7 @@ go get github.com/richinsley/Jumpboot
 Creating an Environment
 To create a new Python environment, use the CreateEnvironment function:
 ```go
-env, err := Jumpboot.CreateEnvironment("myenv", "/path/to/root", "3.10", "conda-forge", Jumpboot.ShowVerbose)
+env, err := Jumpboot.CreateEnvironmentMamba("myenv", "/path/to/root", "3.10", "conda-forge", Jumpboot.ShowVerbose)
 if err != nil {
     // Handle error
 }

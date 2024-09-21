@@ -56,7 +56,7 @@ const (
 	ShowNothing
 )
 
-func CreateEnvironment(envName string, rootDir string, pythonVersion string, channel string, progressCallback ProgressCallback) (*Environment, error) {
+func CreateEnvironmentMamba(envName string, rootDir string, pythonVersion string, channel string, progressCallback ProgressCallback) (*Environment, error) {
 	if pythonVersion == "" {
 		pythonVersion = "3.10"
 	}
@@ -236,23 +236,11 @@ func CreateEnvironment(envName string, rootDir string, pythonVersion string, cha
 	return env, nil
 }
 
-func CreateEnvironmentFromSystem(progressCallback ProgressCallback) (*Environment, error) {
+func CreateEnvironmentFromExacutable(pythonPath string, progressCallback ProgressCallback) (*Environment, error) {
 	env := &Environment{
 		Name:    "system",
 		RootDir: "", // Will be set based on the system Python path
 		IsNew:   false,
-	}
-
-	// Find system Python
-	pythonCmd := "python"
-	if runtime.GOOS == "windows" {
-		pythonCmd = "python.exe"
-	}
-
-	// Try to get Python path
-	pythonPath, err := exec.LookPath(pythonCmd)
-	if err != nil {
-		return nil, fmt.Errorf("system Python not found: %v", err)
 	}
 
 	env.PythonPath = pythonPath
@@ -377,6 +365,48 @@ func CreateEnvironmentFromSystem(progressCallback ProgressCallback) (*Environmen
 	}
 
 	return env, nil
+}
+
+func CreateEnvironmentFromSystem(progressCallback ProgressCallback) (*Environment, error) {
+	pythonPath := ""
+	if runtime.GOOS == "windows" {
+		// windows is a gruesome OS, so we need to hunt for the correct python executable
+		// microsoft has 'place holders' for python, so we must exclude them (AppData\Local\Microsoft\WindowsApps\python.exe)
+		// check for py.exe (the python launcher).  We'll use exec.cmd with 'where'
+		wcmd := exec.Command("where", "py")
+		wout, err := wcmd.Output()
+		if err != nil {
+			return nil, fmt.Errorf("error running 'where py.exe': %v", err)
+		}
+		// we'll use the first path in the list
+		pythonPath = strings.TrimSpace(string(wout))
+		if pythonPath == "" {
+			// ugh, we didn't find py.exe, so we'll use 'where python' and filter out the microsoft placeholder
+			// we'll use the first path in the list
+			wcmd = exec.Command("where", "python")
+			wout, err = wcmd.Output()
+			if err != nil {
+				return nil, fmt.Errorf("error running 'where python': %v", err)
+			}
+			paths := strings.Split(string(wout), "\n")
+			for _, p := range paths {
+				p = strings.TrimSpace(p)
+				if !strings.Contains(p, "Microsoft\\WindowsApps") {
+					pythonPath = p
+					break
+				}
+			}
+		}
+	} else {
+		// for posix systems, we'll use exec.LookPath (see how easy that is Microsoft!?)
+		var err error
+		pythonPath, err = exec.LookPath("python")
+		if err != nil {
+			return nil, fmt.Errorf("system Python not found: %v", err)
+		}
+	}
+
+	return CreateEnvironmentFromExacutable(pythonPath, progressCallback)
 }
 
 func CreateVenvEnvironment(baseEnv *Environment, venvPath string, options VenvOptions, progressCallback ProgressCallback) (*Environment, error) {

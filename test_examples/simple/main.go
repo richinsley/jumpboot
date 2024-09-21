@@ -18,7 +18,7 @@ func main() {
 	rootDirectory := filepath.Join(cwd, "..", "environments")
 	fmt.Println("Creating Jumpboot repo at: ", rootDirectory)
 	version := "3.10"
-	env, err := jumpboot.CreateEnvironment("myenv"+version, rootDirectory, version, "conda-forge", jumpboot.ShowVerbose)
+	env, err := jumpboot.CreateEnvironmentMamba("myenv"+version, rootDirectory, version, "conda-forge", jumpboot.ShowVerbose)
 	if err != nil {
 		fmt.Printf("Error creating environment: %v\n", err)
 		return

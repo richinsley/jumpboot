@@ -183,60 +183,6 @@ func newPackageFromFS(name string, sourcepath string, rootpath string, fs embed.
 	return retv, nil
 }
 
-// func newPackageFromFS(name string, sourcepath string, rootpath string, fs embed.FS) (*Package, error) {
-// 	retv := &Package{
-// 		Name: name,
-// 		Path: rootpath,
-// 	}
-
-// 	// read the directory.  If the directory contains a __init__.py file, then it is a package
-// 	// if it contains a .py file, then it is a module
-// 	// if it contains a directory, then it is a subpackage
-
-// 	// get all directory entries first
-// 	entries, err := fs.ReadDir(rootpath)
-// 	if err != nil {
-// 		return nil, err
-// 	}
-
-// 	// iterate over the entries and recurse into the subdirectories
-// 	for _, entry := range entries {
-// 		fpath := filepath.Join(rootpath, entry.Name())
-// 		if entry.IsDir() {
-// 			// recurse into the subdirectory
-// 			subpackage, err := newPackageFromFS(entry.Name(), sourcepath, fpath, fs)
-// 			if err != nil {
-// 				continue
-// 			}
-// 			retv.Packages = append(retv.Packages, *subpackage)
-// 		} else {
-// 			// read the file
-// 			fpath := filepath.FromSlash(fpath)
-// 			file, err := fs.Open(fpath)
-// 			if err != nil {
-// 				return nil, err
-// 			}
-// 			defer file.Close()
-
-// 			// read the file
-// 			source, err := io.ReadAll(file)
-// 			if err != nil {
-// 				return nil, err
-// 			}
-
-// 			// create a new module if the file is a .py file
-// 			if filepath.Ext(entry.Name()) != ".py" {
-// 				continue
-// 			} else {
-// 				module := NewModuleFromString(entry.Name(), filepath.Join(rootpath, entry.Name()), string(source))
-// 				retv.Modules = append(retv.Modules, *module)
-// 			}
-// 		}
-// 	}
-
-// 	return retv, nil
-// }
-
 // New Package from an embed.FS
 func NewPackageFromFS(name string, sourcepath string, rootpath string, fs embed.FS) (*Package, error) {
 	// the embedded filesystem should be a directory
