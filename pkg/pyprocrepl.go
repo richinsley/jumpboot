@@ -16,6 +16,7 @@ import (
 //go:embed scripts/repl.py
 var replScript string
 
+// REPLPythonProcess represents a Python process that can execute code in a REPL-like manner
 type REPLPythonProcess struct {
 	*PythonProcess
 	m              sync.Mutex
@@ -23,7 +24,10 @@ type REPLPythonProcess struct {
 	combinedOutput bool
 }
 
-func (env *Environment) NewREPLPythonProcess(environment_vars map[string]string) (*REPLPythonProcess, error) {
+// NewREPLPythonProcess creates a new Python process that can execute code in a REPL-like manner
+// kvpairs parameter is a map of key-value pairs to pass to the Python process that are accessible in the Python code via the jumpboot module.
+// environment_vars parameter is a map of environment variables to set in the Python process.
+func (env *Environment) NewREPLPythonProcess(kvpairs map[string]interface{}, environment_vars map[string]string) (*REPLPythonProcess, error) {
 	cwd, _ := os.Getwd()
 	program := &PythonProgram{
 		Name: "JumpBootREPL",
@@ -35,7 +39,7 @@ func (env *Environment) NewREPLPythonProcess(environment_vars map[string]string)
 		},
 		Modules:  []Module{},
 		Packages: []Package{},
-		KVPairs:  map[string]interface{}{},
+		KVPairs:  kvpairs,
 		// KVPairs:  map[string]interface{}{"SHARED_MEMORY_NAME": name, "SHARED_MEMORY_SIZE": size, "SEMAPHORE_NAME": semaphore_name},
 	}
 
@@ -54,6 +58,10 @@ func (env *Environment) NewREPLPythonProcess(environment_vars map[string]string)
 // Define the custom delimiter with non-visible ASCII characters
 const DELIMITER = "\x01\x02\x03\n"
 
+// Execute executes the given code in the Python process and returns the output.
+// code parameter is the Python code to execute within the REPLPythonProcess.
+// combinedOutput parameter specifies whether to combine stdout and stderr as the result.
+// Execute is a blocking function that waits for the Python process to finish executing the code.
 func (rpp *REPLPythonProcess) Execute(code string, combinedOutput bool) (string, error) {
 	// we need to lock the mutex to prevent multiple goroutines from writing to the Python process at the same time
 	rpp.m.Lock()
@@ -117,6 +125,12 @@ func (rpp *REPLPythonProcess) Execute(code string, combinedOutput bool) (string,
 	}
 }
 
+// ExecuteWithTimeout executes the given code in the Python process and returns the output.
+// code parameter is the Python code to execute within the REPLPythonProcess.
+// combinedOutput parameter specifies whether to combine stdout and stderr as the result.
+// timeout parameter specifies the maximum time to wait for the Python process to finish executing the code.
+// ExecuteWithTimeout is a non-blocking function that waits for the Python process to finish executing the code up to the specified timeout.
+// If the timeout is reached, the Python process is terminated, REPLPythonProcess is marked as closed, and an error is returned.
 func (rpp *REPLPythonProcess) ExecuteWithTimeout(code string, combinedOutput bool, timeout time.Duration) (string, error) {
 	// we need to lock the mutex to prevent multiple goroutines from writing to the Python process at the same time
 	rpp.m.Lock()
@@ -203,6 +217,7 @@ func (rpp *REPLPythonProcess) ExecuteWithTimeout(code string, combinedOutput boo
 	}
 }
 
+// Close closes the Python REPL process.
 func (rpp *REPLPythonProcess) Close() error {
 	// we need to lock the mutex to prevent multiple goroutines from writing to the Python process at the same time
 	rpp.m.Lock()

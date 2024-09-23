@@ -20,14 +20,19 @@ class REPLInterpreter(code.InteractiveConsole):
             stdout_f = io.StringIO() if self.__CAPTURE_COMBINED__ else None
             stderr_f = io.StringIO() if self.__CAPTURE_COMBINED__ else None
             result = False
-            
+
+            # split the source into lines
+            # if we try to run a multiline code block as a single string, there could be issues with multiple statements
+            lines = source.splitlines()
             if self.__CAPTURE_COMBINED__:
                 with redirect_stdout(stdout_f), redirect_stderr(stderr_f):
-                    result = self.push(source)
+                    for line in lines:
+                        result = self.push(line)
                     if result:
                         result = self.push('')
             else:
-                result = self.push(source)
+                for line in lines:
+                    result = self.push(line)
                 if result:
                     result = self.push('')
 

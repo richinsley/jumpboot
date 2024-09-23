@@ -16,7 +16,7 @@ func main() {
 		fmt.Printf("Error creating environment: %v\n", err)
 		return
 	}
-	repl, _ := env.NewREPLPythonProcess(nil)
+	repl, _ := env.NewREPLPythonProcess(nil, nil)
 	defer repl.Close()
 
 	// copy output from the Python script
@@ -118,15 +118,16 @@ def factors(n):
     return sorted(factor_list)
 `
 	// give the factor function to the python interpreter
-	_, err = repl.Execute(factors, false)
+	result, err = repl.Execute(factors, true)
 	if err != nil {
 		fmt.Printf("Error executing code: %v\n", err)
 		return
 	}
+	fmt.Println(result)
 
 	// we can now call the factors function from the python interpreter as many times as we want
 	// calculate the factorial of of all the numbers from 1 to 1000
-	for i := 1; i <= 10000; i++ {
+	for i := 1; i <= 1000; i++ {
 		result, err = repl.Execute(fmt.Sprintf("factors(%d)", i), true)
 		if err != nil {
 			fmt.Printf("Error executing code: %v\n", err)
@@ -138,24 +139,28 @@ def factors(n):
 	// create a python function that loops forever and sleeps for 1 second each iteration
 	// this will cause the python interpreter to hang until we kill the process
 	forever := `
+import time
 def forever():
 	while True:
 		print("Sleeping for 1 second")
 		time.sleep(1)
 `
 	// give the forever function to the python interpreter
-	repl.Execute("import time", false)
-	_, err = repl.Execute(forever, false)
+	// repl.Execute("import time", false)
+	result, err = repl.Execute(forever, true)
 	if err != nil {
 		fmt.Printf("Error executing code: %v\n", err)
 		return
 	}
+	fmt.Println(result)
 
 	// call the forever function with a timeout of 3 seconds
-	result, err = repl.ExecuteWithTimeout("forever()", false, 3*time.Second)
+	result, err = repl.ExecuteWithTimeout("forever()", true, 3*time.Second)
 	if err != nil {
-		fmt.Printf("Error executing code: %v\n", err)
+		// this is expected because the python interpreter is hanging
+		fmt.Printf("%v\n", err)
 	}
+	fmt.Println(result)
 
 	// now say goodbye from python - it will return an error because the python interpreter is closed because of the timeout
 	result, err = repl.Execute("print('Goodbye!')", true)
