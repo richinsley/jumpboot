@@ -281,14 +281,23 @@ func CreateEnvironmentFromExacutable(pythonPath string, progressCallback Progres
 	}
 
 	// Get pip path
-	pipCmd := "pip"
+	pipCmd := "pip3"
 	if runtime.GOOS == "windows" {
-		pipCmd = "pip.exe"
+		pipCmd = "pip3.exe"
 	}
 
+	// try pip3 first
 	env.PipPath, err = exec.LookPath(pipCmd)
 	if err != nil {
-		return nil, fmt.Errorf("pip not found: %v", err)
+		// try pip
+		pipCmd = "pip"
+		if runtime.GOOS == "windows" {
+			pipCmd = "pip.exe"
+		}
+		env.PipPath, err = exec.LookPath(pipCmd)
+		if err != nil {
+			return nil, fmt.Errorf("pip not found: %v", err)
+		}
 	}
 
 	if progressCallback != nil {
@@ -400,9 +409,14 @@ func CreateEnvironmentFromSystem(progressCallback ProgressCallback) (*Environmen
 	} else {
 		// for posix systems, we'll use exec.LookPath (see how easy that is Microsoft!?)
 		var err error
-		pythonPath, err = exec.LookPath("python")
+		// look for explicit python3 first
+		pythonPath, err = exec.LookPath("python3")
 		if err != nil {
-			return nil, fmt.Errorf("system Python not found: %v", err)
+			// try "python"
+			pythonPath, err = exec.LookPath("python")
+			if err != nil {
+				return nil, fmt.Errorf("python not found: %v", err)
+			}
 		}
 	}
 
