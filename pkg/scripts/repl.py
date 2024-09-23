@@ -3,10 +3,9 @@ import sys
 import traceback
 import code
 from contextlib import redirect_stdout, redirect_stderr
-import contextlib
 import argparse
 import io
-
+import jumpboot
 DELIMITER = "\x01\x02\x03\n"  # Custom delimiter with non-visible ASCII characters
 
 class REPLInterpreter(code.InteractiveConsole):
@@ -96,5 +95,5 @@ def run_repl(input_pipe, output_pipe):
             global_output_pipe.flush()
 
 if __name__ == "__main__":
-    run_repl(sys.Pipe_in, sys.Pipe_out)
+    run_repl(jumpboot.Pipe_in, jumpboot.Pipe_out)
 

@@ -1,13 +1,12 @@
-import sys
-import os
 import generate
 import models
 import mlx.core as mx
+import jumpboot
 
 def main():
     # use MLX to perform the a simple text completion
     # read the prompt as a line from the pipe
-    prompt = sys.Pipe_in.readline().strip()
+    prompt = jumpboot.Pipe_in.readline().strip()
 
     mx.random.seed(90909090)
     model, tokenizer = models.load("Mistral-7B-Instruct-v0.3.Q8_0.gguf", "MaziyarPanahi/Mistral-7B-Instruct-v0.3-GGUF")
@@ -20,7 +19,7 @@ def main():
     generate.generate(model, tokenizer, prompt, max_tokens, temp)
 
     # write the output to the pipe that we're all done
-    sys.Pipe_out.write("done\n")
+    jumpboot.Pipe_out.write("done\n")
     
     # use the 
 if __name__ == "__main__":

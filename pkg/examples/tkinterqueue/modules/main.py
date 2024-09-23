@@ -8,7 +8,7 @@ from tkinter import ttk
 import threading
 import queue
 
-json_queue = jumpboot.JSONQueue(sys.Pipe_in, sys.Pipe_out)
+json_queue = jumpboot.JSONQueue(jumpboot.Pipe_in, jumpboot.Pipe_out)
 
 class ReaderThread(threading.Thread):
     def __init__(self, json_queue, root, fifo_queue):

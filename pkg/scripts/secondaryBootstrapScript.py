@@ -193,10 +193,6 @@ fd_in = program_data['PipeIn']
 f_out = sys.__jbo(fd_out, 'w')
 f_in = sys.__jbo(fd_in, 'r')
 
-# Attach pipes to sys.Pipe_in and sys.Pipe_out
-sys.Pipe_in = f_in
-sys.Pipe_out = f_out
-
 # Process extra file descriptors
 extra_file_count = int(sys.argv[1])
 extra_file_descriptors = [int(sys.argv[4 + i]) for i in range(extra_file_count - 2)]
@@ -232,6 +228,10 @@ if modules is not None:
 jumpboot_package = importlib.import_module('jumpboot')
 
 if jumpboot_package is not None:
+    # Attach pipes to jumpboot.Pipe_in and jumpboot.Pipe_out
+    setattr(jumpboot_package, "Pipe_in", f_in)
+    setattr(jumpboot_package, "Pipe_out", f_out)
+    
     # process the the KVPairs.  Assign each key value pair to jumpboot package so that it is available as jumpboot.key
     if 'KVPairs' in program_data and program_data['KVPairs'] is not None:
         for key, value in program_data['KVPairs'].items():

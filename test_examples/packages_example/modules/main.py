@@ -34,16 +34,12 @@ def main():
     print(tabulate(table))
 
     # write end message to a queue
-    queue = jumpboot.JSONQueue(sys.Pipe_in, sys.Pipe_out)
+    queue = jumpboot.JSONQueue(jumpboot.Pipe_in, jumpboot.Pipe_out)
     queue.put({"message": "end"})
 
     # read the response from the queue
     response = queue.get()
     print(response)
-
-    # # write "end" to Pipe_Out
-    # sys.Pipe_out.write("end\n")
-    # sys.Pipe_out.flush()
 
 print("Defining main() complete")
 

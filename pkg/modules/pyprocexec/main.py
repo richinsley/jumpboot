@@ -4,7 +4,7 @@ from io import StringIO
 
 def main():
     print("Waiting for message...")
-    json_queue = jumpboot.JSONQueue(sys.Pipe_in, sys.Pipe_out)
+    json_queue = jumpboot.JSONQueue(jumpboot.Pipe_in, jumpboot.Pipe_out)
     while True:
         try:
             # read a message from the queue

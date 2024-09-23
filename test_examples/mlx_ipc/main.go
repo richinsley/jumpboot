@@ -92,7 +92,7 @@ func main() {
 
 	// the jumpboot program makes available a PipeIn and PipeOut in the sys module
 	// write the prompt to the PipeOut
-	// the python script will read from sys.Pipe_in.readline().strip()
+	// the python script will read from jumpboot.Pipe_in.readline().strip()
 	pyProcess.PipeOut.Write([]byte("Write a quicksort in Python\n"))
 
 	// The bootstrap script makes available

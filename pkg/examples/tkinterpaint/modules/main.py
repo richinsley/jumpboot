@@ -10,7 +10,7 @@ import tkinter as tk
 from tkinter import ttk
 import threading
 
-queue = jumpboot.JSONQueue(sys.Pipe_in, sys.Pipe_out)
+queue = jumpboot.JSONQueue(jumpboot.Pipe_in, jumpboot.Pipe_out)
 root = Tk()
 
 def event_to_dict(event):
