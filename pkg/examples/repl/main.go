@@ -104,4 +104,36 @@ for i in range(1, 11):
 		return
 	}
 	fmt.Println(result) // Output: howdy
+
+	factors := `
+def factors(n):
+    if n < 1:
+        return "Factors are only defined for positive integers"
+    
+    factor_list = []
+    for i in range(1, int(n**0.5) + 1):
+        if n % i == 0:
+            factor_list.append(i)
+            if i != n // i:
+                factor_list.append(n // i)
+    
+    return sorted(factor_list)
+`
+	// give the factor function to the python interpreter
+	_, err = repl.Execute(factors, false)
+	if err != nil {
+		fmt.Printf("Error executing code: %v\n", err)
+		return
+	}
+
+	// we can now call the factors function from the python interpreter as many times as we want
+	// calculate the factorial of of all the numbers from 1 to 1000
+	for i := 1; i <= 10000; i++ {
+		result, err = repl.Execute(fmt.Sprintf("factors(%d)", i), true)
+		if err != nil {
+			fmt.Printf("Error executing code: %v\n", err)
+			return
+		}
+		fmt.Printf("factorial(%d) = %s\n", i, result)
+	}
 }
