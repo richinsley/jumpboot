@@ -10,6 +10,7 @@ import (
 	"path"
 	"strings"
 	"sync"
+	"time"
 )
 
 //go:embed scripts/repl.py
@@ -116,6 +117,92 @@ func (rpp *REPLPythonProcess) Execute(code string, combinedOutput bool) (string,
 	}
 }
 
+func (rpp *REPLPythonProcess) ExecuteWithTimeout(code string, combinedOutput bool, timeout time.Duration) (string, error) {
+	// we need to lock the mutex to prevent multiple goroutines from writing to the Python process at the same time
+	rpp.m.Lock()
+	defer rpp.m.Unlock()
+
+	// check if the Python process has been closed
+	if rpp.closed {
+		return "", fmt.Errorf("REPL process has been closed")
+	}
+
+	// if we are changing the combined output setting, update the Python process
+	if rpp.combinedOutput != combinedOutput {
+		cc := "__CAPTURE_COMBINED__ ="
+		if combinedOutput {
+			cc += " True" + DELIMITER
+		} else {
+			cc += " False" + DELIMITER
+		}
+		_, err := rpp.PythonProcess.PipeOut.WriteString(cc)
+		if err != nil {
+			return "", err
+		}
+		rpp.combinedOutput = combinedOutput
+	}
+
+	// trim whitespace from the end of the code
+	code = strings.TrimRight(code, " \t\n\r")
+
+	// append the DELIMITER to the end of the code
+	code += DELIMITER
+
+	// write the code to the Python process as a single string
+	_, err := rpp.PythonProcess.PipeOut.WriteString(code)
+	if err != nil {
+		return "", err
+	}
+
+	// Create a channel to receive the result
+	resultCh := make(chan string, 1)
+	errCh := make(chan error, 1)
+
+	// Start a goroutine to read from the Python process
+	go func() {
+		reader := bufio.NewReader(rpp.PythonProcess.PipeIn)
+		var result strings.Builder
+
+		for {
+			line, err := reader.ReadString('\n')
+			if err != nil && err != io.EOF {
+				errCh <- err
+				return
+			}
+
+			result.WriteString(line)
+
+			// Check if we've received the complete output (marked by the delimiter)
+			if strings.HasSuffix(result.String(), DELIMITER) {
+				// Trim the delimiter and any trailing newline/carriage return from the output
+				output := strings.TrimSuffix(result.String(), DELIMITER)
+				output = strings.TrimRight(output, "\n\r")
+				resultCh <- output
+				return
+			}
+
+			if err == io.EOF {
+				errCh <- fmt.Errorf("unexpected EOF")
+				return
+			}
+		}
+	}()
+
+	// Use select to wait for either the result, error, or a timeout
+	select {
+	case output := <-resultCh:
+		return output, nil
+	case err := <-errCh:
+		return "", err
+	case <-time.After(timeout):
+		// If the timeout is reached, we can't wait for the Python process to finish
+		// so we need to terminate it and mark it as closed
+		rpp.PythonProcess.Terminate()
+		rpp.closed = true
+		return "", fmt.Errorf("execution timed out - Python process terminated")
+	}
+}
+
 func (rpp *REPLPythonProcess) Close() error {
 	// we need to lock the mutex to prevent multiple goroutines from writing to the Python process at the same time
 	rpp.m.Lock()
@@ -125,11 +212,6 @@ func (rpp *REPLPythonProcess) Close() error {
 	if rpp.closed {
 		return fmt.Errorf("REPL process has been closed")
 	}
-
-	// _, err := rpp.PythonProcess.PipeOut.WriteString("exit\n")
-	// if err != nil {
-	// 	return err
-	// }
-
+	rpp.closed = true
 	return rpp.PythonProcess.Terminate()
 }

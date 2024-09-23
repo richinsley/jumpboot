@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"time"
 
 	jumpboot "github.com/richinsley/jumpboot/pkg"
 )
@@ -21,10 +22,12 @@ func main() {
 	// copy output from the Python script
 	go func() {
 		io.Copy(os.Stdout, repl.PythonProcess.Stdout)
+		fmt.Println("Done copying stdout")
 	}()
 
 	go func() {
 		io.Copy(os.Stderr, repl.PythonProcess.Stderr)
+		fmt.Println("Done copying stderr")
 	}()
 
 	var result string
@@ -75,11 +78,6 @@ func main() {
 for i in range(1, 11): 
 	print(i)
 `
-
-	// pscript := `a = 3
-	// b = 5
-	// print(a + b)
-	// `
 
 	// turn off combined output and print howdy
 	result, err = repl.Execute("print(ixvar)", false)
@@ -135,5 +133,34 @@ def factors(n):
 			return
 		}
 		fmt.Printf("factorial(%d) = %s\n", i, result)
+	}
+
+	// create a python function that loops forever and sleeps for 1 second each iteration
+	// this will cause the python interpreter to hang until we kill the process
+	forever := `
+def forever():
+	while True:
+		print("Sleeping for 1 second")
+		time.sleep(1)
+`
+	// give the forever function to the python interpreter
+	repl.Execute("import time", false)
+	_, err = repl.Execute(forever, false)
+	if err != nil {
+		fmt.Printf("Error executing code: %v\n", err)
+		return
+	}
+
+	// call the forever function with a timeout of 3 seconds
+	result, err = repl.ExecuteWithTimeout("forever()", false, 3*time.Second)
+	if err != nil {
+		fmt.Printf("Error executing code: %v\n", err)
+	}
+
+	// now say goodbye from python - it will return an error because the python interpreter is closed because of the timeout
+	result, err = repl.Execute("print('Goodbye!')", true)
+	if err != nil {
+		fmt.Printf("Error executing code: %v\n", err)
+		return
 	}
 }
