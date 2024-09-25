@@ -152,7 +152,7 @@ func main() {
 
 	// Create a shared memory segment
 	name := "my_shared_memory"
-	size := int32(1024)
+	size := 1024
 	segment, err := jumpboot.Create(name, size)
 	if err != nil {
 		log.Fatalf("Failed to create shared memory: %v", err)

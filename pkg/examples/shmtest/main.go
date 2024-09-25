@@ -20,47 +20,28 @@ var main_program string = `
 import jumpboot
 import os
 import sys
-import requests
 from multiprocessing import shared_memory
-from io import BytesIO
-from pydub import AudioSegment
-from pydub.playback import play
 
-# Replace with your actual URL
-url = 'https://www.myinstants.com/media/sounds/dry-fart.mp3'
-
-# Download the audio file
-response = requests.get(url)
-audio_data = BytesIO(response.content)
-
-# Load the audio file into pydub
-# audio = AudioSegment.from_file(audio_data, format="mp3")
-
-# Play the audio
-# play(audio)
-
+# we stored the shared memory name and size in the environment and the semaphore name
+# in the jumpboot module, so we can access them here
 name = jumpboot.SHARED_MEMORY_NAME
 size = jumpboot.SHARED_MEMORY_SIZE
 semname = jumpboot.SEMAPHORE_NAME
 
-############## semaphore
+# open the named semaphore
 sem = jumpboot.NamedSemaphore(semname)
 
 try:
+	# acquire the semaphore to know when the shared memory is ready
 	print("Trying to acquire semaphore...")
-	# sem.acquire()
-	# print("Semaphore acquired")
-	
-	# Simulate some work
-	# time.sleep(2)
-	
+	sem.acquire()
+
 	print("Releasing semaphore")
 	sem.release()
 finally:
 	sem.close()
 
-############## shared buffer
-
+# open the shared memory segment and read the data
 try:
 	# Attach to the existing shared memory segment
 	shm = shared_memory.SharedMemory(name=name, create=False, size=size)
@@ -73,25 +54,6 @@ try:
 	shm.close()
 except Exception as e:
 	print(f"Error: {e}")
-
-############## print info
-# print python system information
-print("\nPython Interpreter Information")
-print(sys.version)
-print(sys.version_info)
-print(sys.executable)
-# pip information
-print("\nPython Package Information")
-print(sys.path)
-print(sys.prefix)
-print(sys.base_prefix)
-print(sys.exec_prefix)
-print(sys.platform)
-print(sys.argv)
-print(sys.flags)
-print(sys.float_info)
-print(sys.float_repr_style)
-print(jumpboot.SHARED_MEMORY_NAME)
 
 print("exit")
 `
@@ -151,7 +113,7 @@ func main() {
 
 	// Create a shared memory segment
 	name := "my_shared_memory"
-	size := int32(1024)
+	size := 1024
 	segment, err := jumpboot.CreateSharedMemory(name, size)
 	if err != nil {
 		log.Fatalf("Failed to create shared memory: %v", err)
@@ -192,12 +154,12 @@ func main() {
 		io.Copy(os.Stderr, pyProcess.Stderr)
 	}()
 
-	err = sem.Acquire()
+	err = sem.Release()
 	if err != nil {
 		log.Fatalf("Failed to acquire semaphore: %v", err)
 	}
 
-	// Read the output line by line
+	// Read the output line by line until we see the exit command
 	scanner := bufio.NewScanner(pyProcess.Stdout)
 	var output string
 	for scanner.Scan() {

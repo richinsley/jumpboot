@@ -4,16 +4,25 @@ import (
 	"io"
 	"os"
 	"syscall"
+	"unsafe"
 )
 
 type shmi struct {
 	h    syscall.Handle
 	v    uintptr
-	size int32
+	size int
+}
+
+func (o *shmi) GetSize() int {
+	return o.size
+}
+
+func (o *shmi) GetPtr() unsafe.Pointer {
+	return unsafe.Pointer(o.v)
 }
 
 // create shared memory. return shmi object.
-func create(name string, size int32) (*shmi, error) {
+func create(name string, size int) (*shmi, error) {
 	key, err := syscall.UTF16PtrFromString(name)
 	if err != nil {
 		return nil, err
@@ -32,11 +41,14 @@ func create(name string, size int32) (*shmi, error) {
 		return nil, os.NewSyscallError("MapViewOfFile", err)
 	}
 
+	// create a slice from the shared memory
+	slice := unsafe.Slice((*byte)(unsafe.Pointer(v)), int(size))
+	slice[0] = 128
 	return &shmi{h, v, size}, nil
 }
 
 // open shared memory. return shmi object.
-func open(name string, size int32) (*shmi, error) {
+func open(name string, size int) (*shmi, error) {
 	return create(name, size)
 }
 

@@ -74,12 +74,20 @@ type shmi struct {
 	name   string
 	fd     C.int
 	v      unsafe.Pointer
-	size   int32
+	size   int
 	parent bool
 }
 
+func (o *shmi) GetSize() int {
+	return o.size
+}
+
+func (o *shmi) GetPtr() unsafe.Pointer {
+	return o.v
+}
+
 // create shared memory. return shmi object.
-func create(name string, size int32) (*shmi, error) {
+func create(name string, size int) (*shmi, error) {
 	name = "/" + name
 
 	fd := C.Create(C.CString(name), C.int(size))
@@ -97,7 +105,7 @@ func create(name string, size int32) (*shmi, error) {
 }
 
 // open shared memory. return shmi object.
-func open(name string, size int32) (*shmi, error) {
+func open(name string, size int) (*shmi, error) {
 	name = "/" + name
 
 	fd := C.Open(C.CString(name), C.int(size))
