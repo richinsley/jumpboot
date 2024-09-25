@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -58,11 +59,17 @@ func (env *Environment) NewREPLPythonProcess(kvpairs map[string]interface{}, env
 // Define the custom delimiter with non-visible ASCII characters
 const DELIMITER = "\x01\x02\x03\n"
 
+// because of course Windows has to be different, we need a different read delimiter for Windows
+// however, we can use the same write delimiter because the Python process will always use the same delimiter
+const WINDELIMITER = "\x01\x02\x03\r\n"
+
 // Execute executes the given code in the Python process and returns the output.
 // code parameter is the Python code to execute within the REPLPythonProcess.
 // combinedOutput parameter specifies whether to combine stdout and stderr as the result.
 // Execute is a blocking function that waits for the Python process to finish executing the code.
 func (rpp *REPLPythonProcess) Execute(code string, combinedOutput bool) (string, error) {
+	iswin := runtime.GOOS == "windows"
+
 	// we need to lock the mutex to prevent multiple goroutines from writing to the Python process at the same time
 	rpp.m.Lock()
 	defer rpp.m.Unlock()
@@ -111,12 +118,22 @@ func (rpp *REPLPythonProcess) Execute(code string, combinedOutput bool) (string,
 
 		result.WriteString(line)
 
-		// Check if we've received the complete output (marked by the delimiter)
-		if strings.HasSuffix(result.String(), DELIMITER) {
-			// Trim the delimiter and any trailing newline/carriage return from the output
-			output := strings.TrimSuffix(result.String(), DELIMITER)
-			output = strings.TrimRight(output, "\n\r")
-			return output, nil
+		if iswin {
+			// Check if we've received the complete output (marked by the WINDELIMITER)
+			if strings.HasSuffix(result.String(), WINDELIMITER) {
+				// Trim the delimiter and any trailing newline/carriage return from the output
+				output := strings.TrimSuffix(result.String(), WINDELIMITER)
+				output = strings.TrimRight(output, "\n\r")
+				return output, nil
+			} else {
+				// Check if we've received the complete output (marked by the delimiter)
+				if strings.HasSuffix(result.String(), DELIMITER) {
+					// Trim the delimiter and any trailing newline/carriage return from the output
+					output := strings.TrimSuffix(result.String(), DELIMITER)
+					output = strings.TrimRight(output, "\n\r")
+					return output, nil
+				}
+			}
 		}
 
 		if err == io.EOF {
