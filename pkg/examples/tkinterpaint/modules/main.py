@@ -9,6 +9,7 @@ from datetime import datetime, date
 import tkinter as tk
 from tkinter import ttk
 import threading
+from tkinter import messagebox
 
 queue = jumpboot.JSONQueue(jumpboot.Pipe_in, jumpboot.Pipe_out)
 root = Tk()
@@ -35,6 +36,9 @@ root.title(  "Paint App ")
 # specify size
 root.geometry("500x350")
 
+def on_closing():
+    if messagebox.askokcancel("Quit", "Do you want to quit?"):
+        root.destroy()
 
 # define function when  
 # mouse double click is enabled
@@ -66,4 +70,11 @@ l = Label( root, text = "Double Click and Drag to draw." )
 l.pack()
 w.pack()
 
+# tkinter uses protocols to handle window closing
+# https://tkinterexamples.com/events/window/
+root.protocol("WM_DELETE_WINDOW", on_closing)
 mainloop()
+
+# when the mainloop exits, send an exit message to the parent process
+print("Exiting...")
+queue.put({'type': 'exit'})

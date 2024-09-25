@@ -4,6 +4,7 @@ import (
 	"bufio"
 	_ "embed"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -33,7 +34,6 @@ func main() {
 		fmt.Println("Created a new environment")
 	}
 
-	env.PipInstallPackage("bson", "", "", false, nil)
 	program := &jumpboot.PythonProgram{
 		Name: "MyProgram",
 		Path: cwd,
@@ -64,20 +64,28 @@ func main() {
 	}()
 
 	// read a line from the Python process PipeIn
+	// the python process has wrapped the jumpboot.Pipe_in and jumpboot.Pipe_out pipes
+	// in a jumpboot.JSONQueue object that sends and receives JSON messages.
+	reader := bufio.NewReader(pyProcess.PipeIn)
 	for {
-		b, err := bufio.NewReader(pyProcess.PipeIn).ReadBytes('\n')
+		b, err := reader.ReadBytes('\n')
 		if err != nil {
 			fmt.Println("Error reading from Python process: ", err)
 		}
 		fmt.Println("Python process says: ", string(b))
-	}
 
-	// // create a json string to send to the Python process
-	// jsonString := `{"message": "Hello from Go!"}`
-	// _, err = pyProcess.PipeOut.Write([]byte(jsonString + "\n"))
-	// if err != nil {
-	// 	fmt.Println("Error writing to Python process: ", err)
-	// }
+		// decode the message json
+		var msg map[string]interface{}
+		err = json.Unmarshal(b, &msg)
+		if err != nil {
+			fmt.Println("Error decoding message: ", err)
+		}
+
+		// check the message 'type' for 'exit'
+		if msg["type"] == "exit" {
+			break
+		}
+	}
 
 	// Wait for the Python process to finish
 	pyProcess.Cmd.Wait()

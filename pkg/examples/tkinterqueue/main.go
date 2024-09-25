@@ -43,7 +43,6 @@ func main() {
 		fmt.Println("Created a new environment")
 	}
 
-	env.PipInstallPackage("bson", "", "", false, progressFunc)
 	program := &jumpboot.PythonProgram{
 		Name: "MyProgram",
 		Path: cwd,
@@ -89,20 +88,14 @@ func main() {
 	}()
 
 	// read a line from the Python process PipeIn
+	reader := bufio.NewReader(pyProcess.PipeIn)
 	for {
-		b, err := bufio.NewReader(pyProcess.PipeIn).ReadBytes('\n')
+		b, err := reader.ReadBytes('\n')
 		if err != nil {
 			fmt.Println("Error reading from Python process: ", err)
 		}
 		fmt.Println("Python process says: ", string(b))
 	}
-
-	// // create a json string to send to the Python process
-	// jsonString := `{"message": "Hello from Go!"}`
-	// _, err = pyProcess.PipeOut.Write([]byte(jsonString + "\n"))
-	// if err != nil {
-	// 	fmt.Println("Error writing to Python process: ", err)
-	// }
 
 	// Wait for the Python process to finish
 	pyProcess.Cmd.Wait()

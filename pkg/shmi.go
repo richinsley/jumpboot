@@ -14,7 +14,7 @@ type Memory struct {
 }
 
 // Create is create shared memory
-func Create(name string, size int32) (*Memory, error) {
+func CreateSharedMemory(name string, size int32) (*Memory, error) {
 	m, err := create(name, size)
 	if err != nil {
 		return nil, err
@@ -23,7 +23,7 @@ func Create(name string, size int32) (*Memory, error) {
 }
 
 // Open is open exist shared memory
-func Open(name string, size int32) (*Memory, error) {
+func OpenSharedMemory(name string, size int32) (*Memory, error) {
 	m, err := open(name, size)
 	if err != nil {
 		return nil, err
