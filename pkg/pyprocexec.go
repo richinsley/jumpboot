@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
-	"path"
+	"path/filepath"
 )
 
 type ExecOptions struct {
@@ -34,7 +34,7 @@ func (env *Environment) NewPythonExecProcess(environment_vars map[string]string,
 		Path: cwd,
 		Program: Module{
 			Name:   "__main__",
-			Path:   path.Join(cwd, "modules", "main.py"),
+			Path:   filepath.Join(cwd, "modules", "main.py"),
 			Source: base64.StdEncoding.EncodeToString([]byte(pythonExecMain)),
 		},
 		Modules:  []Module{},

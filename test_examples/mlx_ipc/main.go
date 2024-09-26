@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path"
 	"path/filepath"
 
 	jumpboot "github.com/richinsley/jumpboot/pkg"
@@ -54,16 +53,16 @@ func main() {
 
 	// the original mlx example exists as a program, not a package, so we'll load each module individually
 	binpath := filepath.Join(cwd, "modules")
-	utils_module := jumpboot.NewModuleFromString("utils", path.Join(binpath, "utils.py"), utils)
-	models_module := jumpboot.NewModuleFromString("models", path.Join(binpath, "models.py"), models)
-	generate_module := jumpboot.NewModuleFromString("generate", path.Join(binpath, "generate.py"), generate)
+	utils_module := jumpboot.NewModuleFromString("utils", filepath.Join(binpath, "utils.py"), utils)
+	models_module := jumpboot.NewModuleFromString("models", filepath.Join(binpath, "models.py"), models)
+	generate_module := jumpboot.NewModuleFromString("generate", filepath.Join(binpath, "generate.py"), generate)
 
 	program := &jumpboot.PythonProgram{
 		Name: "MyProgram",
 		Path: binpath,
 		Program: jumpboot.Module{
 			Name:   "__main__",
-			Path:   path.Join(binpath, "main.py"),
+			Path:   filepath.Join(binpath, "main.py"),
 			Source: base64.StdEncoding.EncodeToString([]byte(main_program)),
 		},
 		Modules: []jumpboot.Module{

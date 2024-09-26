@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path"
 	"path/filepath"
 
 	jumpboot "github.com/richinsley/jumpboot/pkg"
@@ -39,7 +38,7 @@ func main() {
 		Path: cwd,
 		Program: jumpboot.Module{
 			Name:   "__main__",
-			Path:   path.Join(cwd, "modules", "main.py"),
+			Path:   filepath.Join(cwd, "modules", "main.py"),
 			Source: base64.StdEncoding.EncodeToString([]byte(main_program)),
 		},
 		Modules:  []jumpboot.Module{},

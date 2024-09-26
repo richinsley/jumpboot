@@ -2,6 +2,7 @@ package pkg
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"io/fs"
 	"os"
@@ -455,8 +456,7 @@ func CreateVenvEnvironment(baseEnv *Environment, venvPath string, options VenvOp
 	}
 	if options.Clear {
 		args = append(args, "--clear")
-	}
-	if options.Upgrade {
+	} else if options.Upgrade {
 		args = append(args, "--upgrade")
 	}
 	if options.WithoutPip {
@@ -472,9 +472,12 @@ func CreateVenvEnvironment(baseEnv *Environment, venvPath string, options VenvOp
 	args = append(args, venvPath)
 
 	// Create or update the virtual environment
+	var stderr bytes.Buffer
 	venvCmd := exec.Command(baseEnv.PythonPath, args...)
+	venvCmd.Stderr = &stderr // Capture stderr output
 	if err := venvCmd.Run(); err != nil {
-		return nil, fmt.Errorf("failed to create/update virtual environment: %v", err)
+		// Include stderr in the error message
+		return nil, fmt.Errorf("Failed to create/update virtual environment: %v, stderr: %s", err, stderr.String())
 	}
 
 	if progressCallback != nil {

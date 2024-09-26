@@ -8,7 +8,6 @@ import (
 	"io"
 	"log"
 	"os"
-	"path"
 	"path/filepath"
 	"runtime"
 	"unsafe"
@@ -85,8 +84,9 @@ func main() {
 		Upgrade:            true,
 		Prompt:             "my-venv",
 		UpgradeDeps:        true,
+		Clear:              true,
 	}
-	env, err := jumpboot.CreateVenvEnvironment(baseEnv, path.Join(rootDirectory, "sysvenv"), venvOptions, progressFunc)
+	env, err := jumpboot.CreateVenvEnvironment(baseEnv, filepath.Join(rootDirectory, "sysvenv"), venvOptions, progressFunc)
 	if err != nil {
 		log.Fatalf("Error creating venv environment: %v", err)
 	}
@@ -115,12 +115,13 @@ func main() {
 	}
 	defer shm.Close()
 
+	// C:\Users\johnn\jumpboot\jumpboot\pkg\examples\environments\envs\myenv3.11\python.exe -m venv --system-site-packages --clear --upgrade --prompt my-venv --upgrade-deps C:\Users\johnn\jumpboot\jumpboot\pkg\examples\environments\sysvenv
 	program := &jumpboot.PythonProgram{
 		Name: "MyProgram",
 		Path: cwd,
 		Program: jumpboot.Module{
 			Name:   "__main__",
-			Path:   path.Join(cwd, "modules", "main.py"),
+			Path:   filepath.Join(cwd, "modules", "main.py"),
 			Source: base64.StdEncoding.EncodeToString([]byte(main_program)),
 		},
 		Modules:  []jumpboot.Module{},

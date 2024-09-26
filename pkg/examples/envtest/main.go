@@ -8,7 +8,6 @@ import (
 	"io"
 	"log"
 	"os"
-	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -129,7 +128,7 @@ func main() {
 		Prompt:             "my-venv",
 		UpgradeDeps:        true,
 	}
-	env, err := jumpboot.CreateVenvEnvironment(baseEnv, path.Join(rootDirectory, "sysvenv"), venvOptions, progressFunc)
+	env, err := jumpboot.CreateVenvEnvironment(baseEnv, filepath.Join(rootDirectory, "sysvenv"), venvOptions, progressFunc)
 	if err != nil {
 		log.Fatalf("Error creating venv environment: %v", err)
 	}
@@ -173,7 +172,7 @@ func main() {
 		Path: cwd,
 		Program: jumpboot.Module{
 			Name:   "__main__",
-			Path:   path.Join(cwd, "modules", "main.py"),
+			Path:   filepath.Join(cwd, "modules", "main.py"),
 			Source: base64.StdEncoding.EncodeToString([]byte(main_program)),
 		},
 		Modules:  []jumpboot.Module{},

@@ -105,7 +105,8 @@ func GetTypedSlice[T any](shm *SharedMemory, offset int) []T {
 	numElements := remainingSize / elementSize
 
 	// Create a slice using unsafe.Slice
-	return unsafe.Slice((*T)(unsafe.Add(shm.m.v, uintptr(offset))), int(numElements))
+	ptr := shm.GetPtr()
+	return unsafe.Slice((*T)(unsafe.Add(ptr, uintptr(offset))), int(numElements))
 }
 
 // Type-specific methods for common types

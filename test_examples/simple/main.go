@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path"
 	"path/filepath"
 
 	jumpboot "github.com/richinsley/jumpboot/pkg"
@@ -55,7 +54,7 @@ while True:
 print("Python script ending")
 `
 
-	binpath := path.Join(cwd, "bin")
+	binpath := filepath.Join(cwd, "bin")
 
 	// Define a Python program with a main program
 	// we could add additional embedded modules and packages here
@@ -64,7 +63,7 @@ print("Python script ending")
 		Path: binpath,
 		Program: jumpboot.Module{
 			Name:   "__main__",
-			Path:   path.Join(binpath, "main.py"),
+			Path:   filepath.Join(binpath, "main.py"),
 			Source: base64.StdEncoding.EncodeToString([]byte(main_script)),
 		},
 		Modules: []jumpboot.Module{},
