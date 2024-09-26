@@ -18,7 +18,7 @@ import (
 //go:embed main.py
 var main_program string
 
-func createSharedNumPyArray[T any](name string, shape []int) (*jumpboot.SharedMemory, int, error) {
+func CreateSharedNumPyArray[T any](name string, shape []int) (*jumpboot.SharedMemory, int, error) {
 	// Calculate total size
 	size := 1
 	for _, dim := range shape {
@@ -84,7 +84,7 @@ func main() {
 		Upgrade:            true,
 		Prompt:             "my-venv",
 		UpgradeDeps:        true,
-		Clear:              true,
+		// Clear:              true,
 	}
 	env, err := jumpboot.CreateVenvEnvironment(baseEnv, filepath.Join(rootDirectory, "sysvenv"), venvOptions, progressFunc)
 	if err != nil {
@@ -108,8 +108,8 @@ func main() {
 
 	// Shared Numpy array
 	numpy_name := "my_array"
-	shape := []int{100, 100}
-	shm, nsize, err := createSharedNumPyArray[float32]("my_array", shape)
+	shape := []int{100, 100, 100}
+	shm, nsize, err := CreateSharedNumPyArray[float32]("my_array", shape)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -155,7 +155,7 @@ func main() {
 	// do something with the shared memory
 
 	// Release the semaphore so the Python process can exit
-	err = sem.Release()
+	sem.Release()
 
 	// Wait for the Python process to finish
 	pyProcess.Cmd.Wait()

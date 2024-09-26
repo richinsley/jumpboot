@@ -18,9 +18,9 @@ def read_shared_numpy_array(shm):
     dtype_str = buf[4+rank*4:20+rank*4].tobytes().decode().strip('\x00')
     endian_flag = buf[20+rank*4:21+rank*4].tobytes()
 
-    print(f"dtype_str: {dtype_str}")
-    print(f"endian_flag: {endian_flag}")
-    print(f"shape: {shape}")
+    # print(f"dtype_str: {dtype_str}")
+    # print(f"endian_flag: {endian_flag}")
+    # print(f"shape: {shape}")
 
     # Determine endianness
     if endian_flag == b'L':
@@ -51,35 +51,53 @@ def read_shared_numpy_array(shm):
     # Create NumPy array from shared memory
     arr = np.frombuffer(buf[metadata_size:metadata_size+expected_size], dtype=full_dtype).reshape(shape)
 
-    print(f"Array shape: {arr.shape}")
-    print(f"Array dtype: {arr.dtype}")
+    # print(f"Array shape: {arr.shape}")
+    # print(f"Array dtype: {arr.dtype}")
 
     return arr
 
 # open the named semaphore
 sem = jumpboot.NamedSemaphore(semname)
 
-# open the shared memory segment and read the data
+shm = None
+np_array = None
+
 try:
-	# Attach to the existing shared memory segment
+    # Attach to the existing shared memory segment
     shm = shared_memory.SharedMemory(name=name, create=False, size=size)
     if shm is not None:
         # Read the NumPy array from shared memory
-        arr = read_shared_numpy_array(shm)
-        print(f"Read NumPy array of shape {arr.shape} and dtype {arr.dtype}")
+        np_array = read_shared_numpy_array(shm)
+        print(f"Read NumPy array of shape {np_array.shape} and dtype {np_array.dtype}")
         
         # Example operation: calculate mean
-        mean_value = np.mean(arr)
+        mean_value = np.mean(np_array)
         print(f"Mean value: {mean_value}")
     else:
         print("Failed to open shared memory")
 except Exception as e:
-	print(f"Error: {e}")
-
-try:
-    print("Releasing semaphore")
-    sem.release()
+    print(f"Error: {e}")
 finally:
-    sem.close()
+    # Cleanup
+    if np_array is not None:
+        np_array = None  # Remove reference to numpy array
+
+    if shm is not None:
+        try:
+            shm.close()
+        except BufferError:
+            print("Warning: Unable to close shared memory immediately.")
+        finally:
+            shm = None  # Remove reference to shared memory object
+
+    # Force garbage collection
+    # import gc
+    # gc.collect()
+
+    try:
+        print("Releasing semaphore")
+        sem.release()
+    finally:
+        sem.close()
 
 print("exit")
