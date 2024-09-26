@@ -85,8 +85,12 @@ type shmi struct {
 	parent bool
 }
 
-func (o *shmi) datapointer() uintptr {
-	return uintptr(o.v)
+func (o *shmi) getSize() int {
+	return o.size
+}
+
+func (o *shmi) getPtr() unsafe.Pointer {
+	return o.v
 }
 
 // create shared memory. return shmi object.

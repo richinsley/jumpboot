@@ -1,9 +1,9 @@
 package main
 
 import (
-	"bufio"
 	_ "embed"
 	"encoding/base64"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"log"
@@ -11,52 +11,47 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
-	"strings"
+	"unsafe"
 
 	jumpboot "github.com/richinsley/jumpboot/pkg"
 )
 
-var main_program string = `
-import jumpboot
-import os
-import sys
-from multiprocessing import shared_memory
+//go:embed main.py
+var main_program string
 
-# we stored the shared memory name and size in the environment and the semaphore name
-# in the jumpboot module, so we can access them here
-name = jumpboot.SHARED_MEMORY_NAME
-size = jumpboot.SHARED_MEMORY_SIZE
-semname = jumpboot.SEMAPHORE_NAME
+func createSharedNumPyArray[T any](name string, shape []int) (*jumpboot.SharedMemory, int, error) {
+	// Calculate total size
+	size := 1
+	for _, dim := range shape {
+		size *= dim
+	}
 
-# open the named semaphore
-sem = jumpboot.NamedSemaphore(semname)
+	// Add extra space for metadata (shape, dtype, and endianness flag)
+	metadataSize := 4 + len(shape)*4 + 16 + 1 // 4 bytes for rank, 4 bytes per dimension, 16 bytes for dtype, 1 byte for endianness
+	totalSize := metadataSize + size*int(unsafe.Sizeof(new(T)))
 
-try:
-	# acquire the semaphore to know when the shared memory is ready
-	print("Trying to acquire semaphore...")
-	sem.acquire()
+	// Create shared memory
+	shm, err := jumpboot.CreateSharedMemory(name, totalSize)
+	if err != nil {
+		return nil, 0, err
+	}
 
-	print("Releasing semaphore")
-	sem.release()
-finally:
-	sem.close()
+	// Get the byte slice for metadata
+	metadataSlice := unsafe.Slice((*byte)(shm.GetPtr()), metadataSize)
 
-# open the shared memory segment and read the data
-try:
-	# Attach to the existing shared memory segment
-	shm = shared_memory.SharedMemory(name=name, create=False, size=size)
-	
-	# Read data from the shared memory
-	data = shm.buf[:].tobytes()
-	print(f"Data read from shared memory: {data.decode('utf-8')}")
+	// Write metadata
+	binary.LittleEndian.PutUint32(metadataSlice[:4], uint32(len(shape)))
+	for i, dim := range shape {
+		binary.LittleEndian.PutUint32(metadataSlice[4+i*4:8+i*4], uint32(dim))
+	}
+	dtype := jumpboot.GetDType[T]()
+	copy(metadataSlice[4+len(shape)*4:20+len(shape)*4], []byte(dtype))
 
-	# Close the shared memory segment
-	shm.close()
-except Exception as e:
-	print(f"Error: {e}")
+	// Write endianness flag
+	metadataSlice[20+len(shape)*4] = 'L' // 'L' for little-endian
 
-print("exit")
-`
+	return shm, totalSize, nil
+}
 
 func main() {
 	// Specify the binary folder to place micromamba in
@@ -111,23 +106,14 @@ func main() {
 		log.Fatalf("Failed to create semaphore: %v", err)
 	}
 
-	// Create a shared memory segment
-	name := "my_shared_memory"
-	size := 1024
-	segment, err := jumpboot.CreateSharedMemory(name, size)
+	// Shared Numpy array
+	numpy_name := "my_array"
+	shape := []int{100, 100}
+	shm, nsize, err := createSharedNumPyArray[float32]("my_array", shape)
 	if err != nil {
-		log.Fatalf("Failed to create shared memory: %v", err)
+		log.Fatal(err)
 	}
-	defer segment.Close()
-
-	// Write some data to the shared memory
-	data := []byte("Hello from Go!")
-	_, err = segment.Write(data)
-	if err != nil {
-		log.Fatalf("Failed to write to shared memory: %v", err)
-	}
-
-	// Get the shared memory name and size
+	defer shm.Close()
 
 	program := &jumpboot.PythonProgram{
 		Name: "MyProgram",
@@ -139,7 +125,7 @@ func main() {
 		},
 		Modules:  []jumpboot.Module{},
 		Packages: []jumpboot.Package{},
-		KVPairs:  map[string]interface{}{"SHARED_MEMORY_NAME": name, "SHARED_MEMORY_SIZE": size, "SEMAPHORE_NAME": semaphore_name},
+		KVPairs:  map[string]interface{}{"SHARED_MEMORY_NAME": numpy_name, "SHARED_MEMORY_SIZE": nsize, "SEMAPHORE_NAME": semaphore_name},
 	}
 
 	// create a string map of env options to pass to the Python process
@@ -150,26 +136,25 @@ func main() {
 		panic(err)
 	}
 
+	// copy output from the Python script
+	go func() {
+		io.Copy(os.Stdout, pyProcess.Stdout)
+	}()
+
 	go func() {
 		io.Copy(os.Stderr, pyProcess.Stderr)
 	}()
 
-	err = sem.Release()
+	// wait for the semaphore to be released on the python side
+	err = sem.Acquire()
 	if err != nil {
 		log.Fatalf("Failed to acquire semaphore: %v", err)
 	}
 
-	// Read the output line by line until we see the exit command
-	scanner := bufio.NewScanner(pyProcess.Stdout)
-	var output string
-	for scanner.Scan() {
-		line := scanner.Text()
-		fmt.Println(line)     // Print each line (optional)
-		output += line + "\n" // Store the line in the output string
-		if strings.HasPrefix(line, "exit") {
-			break
-		}
-	}
+	// do something with the shared memory
+
+	// Release the semaphore so the Python process can exit
+	err = sem.Release()
 
 	// Wait for the Python process to finish
 	pyProcess.Cmd.Wait()

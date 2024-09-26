@@ -78,11 +78,11 @@ type shmi struct {
 	parent bool
 }
 
-func (o *shmi) GetSize() int {
+func (o *shmi) getSize() int {
 	return o.size
 }
 
-func (o *shmi) GetPtr() unsafe.Pointer {
+func (o *shmi) getPtr() unsafe.Pointer {
 	return o.v
 }
 
