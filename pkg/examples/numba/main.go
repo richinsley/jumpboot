@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -87,7 +88,6 @@ func main() {
 		Upgrade:            true,
 		Prompt:             "my-venv",
 		UpgradeDeps:        true,
-		// Clear:              true,
 	}
 	env, err := jumpboot.CreateVenvEnvironment(baseEnv, filepath.Join(rootDirectory, "sysvenv"), venvOptions, progressFunc)
 	if err != nil {
@@ -109,14 +109,22 @@ func main() {
 		log.Fatalf("Failed to create semaphore: %v", err)
 	}
 
-	// Shared Numpy array
-	numpy_name := "my_array"
-	shape := []int{100, 100, 100}
-	shm, nsize, err := CreateSharedNumPyArray[float32]("my_array", shape)
+	// Create a large 2D array (e.g., 10000x10000)
+	numpy_name := "large_array"
+	shape := []int{10000, 10000}
+	shm, size, err := CreateSharedNumPyArray[float32](numpy_name, shape)
 	if err != nil {
-		log.Fatal(err)
+		panic(err)
 	}
 	defer shm.Close()
+
+	// Fill the array with random float32 values
+	data := jumpboot.GetTypedSlice[float32](shm, 21+4*len(shape)) // Skip metadata
+	for i := range data {
+		data[i] = rand.Float32()
+	}
+
+	fmt.Printf("Created shared array of size %d\n", size)
 
 	// C:\Users\johnn\jumpboot\jumpboot\pkg\examples\environments\envs\myenv3.11\python.exe -m venv --system-site-packages --clear --upgrade --prompt my-venv --upgrade-deps C:\Users\johnn\jumpboot\jumpboot\pkg\examples\environments\sysvenv
 	program := &jumpboot.PythonProgram{
@@ -129,7 +137,7 @@ func main() {
 		},
 		Modules:  []jumpboot.Module{},
 		Packages: []jumpboot.Package{},
-		KVPairs:  map[string]interface{}{"SHARED_MEMORY_NAME": numpy_name, "SHARED_MEMORY_SIZE": nsize, "SEMAPHORE_NAME": semaphore_name},
+		KVPairs:  map[string]interface{}{"SHARED_MEMORY_NAME": numpy_name, "SHARED_MEMORY_SIZE": size, "SEMAPHORE_NAME": semaphore_name},
 	}
 
 	// create a string map of env options to pass to the Python process
