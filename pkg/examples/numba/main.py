@@ -10,12 +10,23 @@ size = jumpboot.SHARED_MEMORY_SIZE
 semname = jumpboot.SEMAPHORE_NAME
 
 def read_shared_numpy_array(shm):
-    # Read metadata
     buf = shm.buf
+
+    # Read rank
     rank = np.frombuffer(buf[:4], dtype=np.uint32)[0]
-    shape = np.frombuffer(buf[4:4+rank*4], dtype=np.uint32)
-    dtype_str = buf[4+rank*4:20+rank*4].tobytes().decode().strip('\x00')
-    endian_flag = buf[20+rank*4:21+rank*4].tobytes()
+
+    # Read shape
+    shape_offset = 4
+    shape = np.frombuffer(buf[shape_offset:shape_offset + rank * 4], dtype=np.uint32)
+
+    # Read dtype string
+    dtype_offset = shape_offset + rank * 4
+    dtype_bytes = buf[dtype_offset:dtype_offset + 16]
+    dtype_str = dtype_bytes.tobytes().decode().strip('\x00')
+
+    # Read endianness flag
+    endian_offset = dtype_offset + 16
+    endian_flag = buf[endian_offset:endian_offset + 1].tobytes()
 
     # Determine endianness
     if endian_flag == b'L':
@@ -25,24 +36,20 @@ def read_shared_numpy_array(shm):
     else:
         raise ValueError(f"Invalid endianness flag: {endian_flag}")
 
-    # Create dtype
+    # Create dtype with exception handling
     try:
         full_dtype = np.dtype(f"{endianness}{dtype_str}")
     except TypeError:
         full_dtype = np.dtype(dtype_str)
 
-    # Calculate data offset
-    metadata_size = 21 + rank * 4  # 4 for rank, 4*rank for shape, 16 for dtype, 1 for endianness
+    # Calculate metadata size
+    metadata_size = endian_offset + 1
 
     # Calculate expected data size
     expected_size = np.prod(shape) * full_dtype.itemsize
 
-    # Ensure the buffer is the correct size
-    if len(buf) < metadata_size + expected_size:
-        raise ValueError(f"Buffer size ({len(buf)}) is smaller than expected ({metadata_size + expected_size})")
-
     # Create NumPy array from shared memory
-    arr = np.frombuffer(buf[metadata_size:metadata_size+expected_size], dtype=full_dtype).reshape(shape)
+    arr = np.frombuffer(buf[metadata_size:metadata_size + expected_size], dtype=full_dtype).reshape(shape)
 
     return arr
 

@@ -118,10 +118,10 @@ func main() {
 	}
 	defer shm.Close()
 
-	// Fill the array with random float32 values
+	// Fill the array with random int32 values
 	data := jumpboot.GetTypedSlice[float32](shm, 21+4*len(shape)) // Skip metadata
 	for i := range data {
-		data[i] = rand.Float32()
+		data[i] = float32(rand.Float32())
 	}
 
 	fmt.Printf("Created shared array of size %d\n", size)
