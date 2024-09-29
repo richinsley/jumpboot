@@ -1,5 +1,12 @@
 package main
 
+// there is also:
+// Triton:
+// https://openai.com/index/triton/
+//
+// Taichi:
+// https://github.com/taichi-dev/taichi/tree/master
+
 import (
 	_ "embed"
 	"encoding/base64"
@@ -127,12 +134,14 @@ func main() {
 	fmt.Printf("Created shared array of size %d\n", size)
 
 	// C:\Users\johnn\jumpboot\jumpboot\pkg\examples\environments\envs\myenv3.11\python.exe -m venv --system-site-packages --clear --upgrade --prompt my-venv --upgrade-deps C:\Users\johnn\jumpboot\jumpboot\pkg\examples\environments\sysvenv
+	mainpath := filepath.Join(cwd, "modules", "main.py")
+	fmt.Println("Main path: ", mainpath)
 	program := &jumpboot.PythonProgram{
 		Name: "MyProgram",
 		Path: cwd,
 		Program: jumpboot.Module{
 			Name:   "__main__",
-			Path:   filepath.Join(cwd, "modules", "main.py"),
+			Path:   mainpath,
 			Source: base64.StdEncoding.EncodeToString([]byte(main_program)),
 		},
 		Modules:  []jumpboot.Module{},

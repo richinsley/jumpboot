@@ -96,12 +96,60 @@ class CustomFinder(MetaPathFinder):
         spec.loader.exec_module(module)
         return module
 
+# class CustomLoader(Loader):
+#     def __init__(self, source, path, fullname, finder):
+#         self.source = source
+#         self.path = path
+#         self.fullname = fullname
+#         self.finder = finder
+
+#     def create_module(self, spec):
+#         return None
+
+#     def exec_module(self, module):
+#         debug_out(f"Executing module: {self.fullname}")
+        
+#         # Set up module attributes
+#         module.__dict__['__cached_source__'] = self.source
+#         # module.__file__ = self.path <- This is not needed for in-memory files
+#         if self.fullname == '__main__':
+#             module.__package__ = ''
+#         elif '.' in self.fullname:
+#             module.__package__ = '.'.join(self.fullname.split('.')[:-1])
+#         else:
+#             module.__package__ = self.fullname
+
+#         if self.path.endswith('__init__.py'):
+#             module.__path__ = [os.path.dirname(self.path)]
+
+#         # Create a proper spec for the module
+#         spec = importlib.util.spec_from_file_location(self.fullname, self.path, loader=self)
+#         module.__spec__ = spec
+
+#         # Support debugging For in-memory files by adding the source to linecache
+#         unique_filename = f"<{self.fullname}>"
+#         print(f"Adding source to linecache: {unique_filename}")
+#         linecache.cache[unique_filename] = (
+#             len(self.source),
+#             None,
+#             self.source.splitlines(True),
+#             unique_filename,
+#         )
+#         compiled = compile(self.source, unique_filename, 'exec', dont_inherit=True)
+
+#         # Execute the compiled code
+#         exec(compiled, module.__dict__)
+        
+#         self.finder.loaded_modules[self.fullname] = module
+        
+#         debug_out(f"Finished executing module: {self.fullname}")
+
 class CustomLoader(Loader):
     def __init__(self, source, path, fullname, finder):
         self.source = source
-        self.path = path
         self.fullname = fullname
         self.finder = finder
+        self.path = path  # Use the module's Path directly
 
     def create_module(self, spec):
         return None
@@ -111,7 +159,9 @@ class CustomLoader(Loader):
         
         # Set up module attributes
         module.__dict__['__cached_source__'] = self.source
-        # module.__file__ = self.path <- This is not needed for in-memory files
+        module.__file__ = self.path  # Set to the module's path
+        module.__loader__ = self
+
         if self.fullname == '__main__':
             module.__package__ = ''
         elif '.' in self.fullname:
@@ -126,8 +176,9 @@ class CustomLoader(Loader):
         spec = importlib.util.spec_from_file_location(self.fullname, self.path, loader=self)
         module.__spec__ = spec
 
-        # Support debugging For in-memory files by adding the source to linecache
-        unique_filename = f"<{self.fullname}>"
+        # Add the source to linecache with the module's path
+        unique_filename = self.path
+        debug_out(f"Adding source to linecache: {unique_filename}")
         linecache.cache[unique_filename] = (
             len(self.source),
             None,
@@ -143,20 +194,68 @@ class CustomLoader(Loader):
         
         debug_out(f"Finished executing module: {self.fullname}")
 
+
+
+# def load_program_data(program_data):
+#     modules = {}
+    
+#     def process_package(package, parent_name=''):
+#         package_name = f"{parent_name}.{package['Name']}" if parent_name else package['Name']
+        
+#         # Add __init__.py for each package
+#         init_module = next((m for m in package.get('Modules', []) if m['Name'] == '__init__.py'), None)
+#         if init_module:
+#             modules[package_name] = init_module
+#         else:
+#             modules[package_name] = {
+#                 'Name': '__init__.py',
+#                 'Path': os.path.join(package['Path'], '__init__.py'),
+#                 'Source': base64.b64encode(b'').decode('utf-8')
+#             }
+        
+#         if 'Modules' in package and package['Modules'] is not None:
+#             for module in package['Modules']:
+#                 if module['Name'] != '__init__.py':
+#                     module_name = f"{package_name}.{module['Name'].split('.')[0]}"
+#                     modules[module_name] = module
+
+#         if 'Packages' in package and package['Packages'] is not None:
+#             for sub_package in package['Packages']:
+#                 process_package(sub_package, package_name)
+
+#     if 'Packages' in program_data and program_data['Packages'] is not None:
+#         for package in program_data['Packages']:
+#             process_package(package)
+
+#     if 'Modules' in program_data and program_data['Modules'] is not None:
+#         for module in program_data['Modules']:
+#             modules[module['Name']] = module
+
+#     modules[program_data['Program']['Name']] = program_data['Program']
+
+#     return modules
+
 def load_program_data(program_data):
     modules = {}
     
     def process_package(package, parent_name=''):
         package_name = f"{parent_name}.{package['Name']}" if parent_name else package['Name']
         
+        # Use the Path if it ends with .py; otherwise, create a synthetic path
+        if package.get('Path', '').endswith('.py'):
+            package_path = package['Path']
+        else:
+            package_path = f"/virtual_modules/{package_name.replace('.', '/')}"
+        
         # Add __init__.py for each package
         init_module = next((m for m in package.get('Modules', []) if m['Name'] == '__init__.py'), None)
         if init_module:
+            init_module['Path'] = os.path.join(package_path, '__init__.py') if not init_module['Name'].endswith('.py') else init_module['Path']
             modules[package_name] = init_module
         else:
             modules[package_name] = {
                 'Name': '__init__.py',
-                'Path': os.path.join(package['Path'], '__init__.py'),
+                'Path': os.path.join(package_path, '__init__.py'),
                 'Source': base64.b64encode(b'').decode('utf-8')
             }
         
@@ -164,23 +263,38 @@ def load_program_data(program_data):
             for module in package['Modules']:
                 if module['Name'] != '__init__.py':
                     module_name = f"{package_name}.{module['Name'].split('.')[0]}"
+                    if module.get('Path', '').endswith('.py'):
+                        module['Path'] = module['Path']
+                    else:
+                        module['Path'] = os.path.join(package_path, module['Name'])
                     modules[module_name] = module
 
         if 'Packages' in package and package['Packages'] is not None:
             for sub_package in package['Packages']:
                 process_package(sub_package, package_name)
-
+    
     if 'Packages' in program_data and program_data['Packages'] is not None:
         for package in program_data['Packages']:
             process_package(package)
 
     if 'Modules' in program_data and program_data['Modules'] is not None:
         for module in program_data['Modules']:
+            # Use Path if it ends with .py
+            if module.get('Path', '').endswith('.py'):
+                module['Path'] = module['Path']
+            else:
+                module['Path'] = f"/virtual_modules/{module['Name']}"
             modules[module['Name']] = module
 
+    # Ensure the main program has the Path
+    if program_data['Program'].get('Path', '').endswith('.py'):
+        program_data['Program']['Path'] = program_data['Program']['Path']
+    else:
+        program_data['Program']['Path'] = f"/virtual_modules/{program_data['Program']['Name']}"
     modules[program_data['Program']['Name']] = program_data['Program']
 
     return modules
+
 
 # Read program data from the second pipe
 fd_program = int(sys.argv[3])
@@ -245,4 +359,22 @@ loader = CustomLoader(main_source, main_module_info['Path'], '__main__', custom_
 spec = importlib.util.spec_from_file_location('__main__', main_module_info['Path'], loader=loader)
 main_module = importlib.util.module_from_spec(spec)
 sys.modules['__main__'] = main_module
+
+# if program_data has a field 'DebugPort' and it is not None and non-zero, then start the debug server
+# and wait for the client to connect and stop at the breakpoint.
+if 'DebugPort' in program_data and program_data['DebugPort'] is not None and program_data['DebugPort'] != 0:
+    # check if debugpy is installed and if not, install it
+    try:
+        import debugpy
+    except ImportError:
+        import subprocess
+        subprocess.run([sys.executable, '-m', 'pip', 'install', 'debugpy'])
+        import debugpy
+    print("DEBUGGING")
+    debugpy.listen(("localhost", program_data['DebugPort']))
+    debugpy.wait_for_client()
+    if 'BreakOnStart' in program_data and program_data['BreakOnStart']:
+        breakpoint()
+
+
 loader.exec_module(main_module)

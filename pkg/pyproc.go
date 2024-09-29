@@ -71,7 +71,11 @@ type PythonProgram struct {
 	Modules  []Module
 	PipeIn   int
 	PipeOut  int
-	KVPairs  map[string]interface{}
+	// DebugPort - setting this to a non-zero value will start the debugpy server on the specified port
+	// and wait for the debugger to attach before running the program in the bootstrap script
+	DebugPort    int
+	BreakOnStart bool
+	KVPairs      map[string]interface{}
 }
 
 // Data struct to hold the pipe number

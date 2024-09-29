@@ -3,6 +3,7 @@ import os
 import sys
 import numpy as np
 from multiprocessing import shared_memory
+import gc
 
 # we stored the shared memory name and size in the environment and the semaphore name
 # in the jumpboot module, so we can access them here
@@ -88,9 +89,8 @@ finally:
         finally:
             shm = None  # Remove reference to shared memory object
 
-    # Force garbage collection
-    # import gc
-    # gc.collect()
+    # Force garbage collection to release resources
+    gc.collect()
 
     try:
         print("Releasing semaphore")

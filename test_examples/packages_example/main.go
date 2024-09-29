@@ -65,6 +65,8 @@ func main() {
 			*math_operations_package,
 			*tabulate_package,
 		},
+		// DebugPort:    5678, // start the debugger on port 5678
+		// BreakOnStart: true,
 	}
 
 	// create a string map of env options to pass to the Python process

@@ -96,7 +96,7 @@ func main() {
 
 	if env.IsNew {
 		fmt.Println("Created a new venv environment")
-		env.PipInstallPackages([]string{"numba", "numpy"}, "", "", false, nil)
+		env.PipInstallPackages([]string{"numba", "numpy", "debugpy"}, "", "", false, nil)
 	}
 
 	// create a shared semaphore
@@ -119,23 +119,27 @@ func main() {
 	defer shm.Close()
 
 	// C:\Users\johnn\jumpboot\jumpboot\pkg\examples\environments\envs\myenv3.11\python.exe -m venv --system-site-packages --clear --upgrade --prompt my-venv --upgrade-deps C:\Users\johnn\jumpboot\jumpboot\pkg\examples\environments\sysvenv
+	mainpath := filepath.Join(cwd, "main.py")
+	fmt.Println("Main path: ", mainpath)
 	program := &jumpboot.PythonProgram{
 		Name: "MyProgram",
 		Path: cwd,
 		Program: jumpboot.Module{
 			Name:   "__main__",
-			Path:   filepath.Join(cwd, "modules", "main.py"),
+			Path:   mainpath,
 			Source: base64.StdEncoding.EncodeToString([]byte(main_program)),
 		},
 		Modules:  []jumpboot.Module{},
 		Packages: []jumpboot.Package{},
 		KVPairs:  map[string]interface{}{"SHARED_MEMORY_NAME": numpy_name, "SHARED_MEMORY_SIZE": nsize, "SEMAPHORE_NAME": semaphore_name},
+		// DebugPort:    5678, // start the debugger on port 5678
+		// BreakOnStart: true,
 	}
 
 	// create a string map of env options to pass to the Python process
 	envOptions := map[string]string{}
 
-	pyProcess, _, err := env.NewPythonProcessFromProgram(program, envOptions, nil, false)
+	pyProcess, _, err := env.NewPythonProcessFromProgram(program, envOptions, nil, false, "-Xfrozen_modules=off")
 	if err != nil {
 		panic(err)
 	}
@@ -162,4 +166,6 @@ func main() {
 
 	// Wait for the Python process to finish
 	pyProcess.Cmd.Wait()
+
+	fmt.Println("Python process finished")
 }
