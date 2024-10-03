@@ -237,7 +237,7 @@ func CreateEnvironmentMamba(envName string, rootDir string, pythonVersion string
 	return env, nil
 }
 
-func CreateEnvironmentFromExacutable(pythonPath string, progressCallback ProgressCallback) (*Environment, error) {
+func CreateEnvironmentFromExacutable(pythonPath string) (*Environment, error) {
 	env := &Environment{
 		Name:    "system",
 		RootDir: "", // Will be set based on the system Python path
@@ -246,10 +246,6 @@ func CreateEnvironmentFromExacutable(pythonPath string, progressCallback Progres
 
 	env.PythonPath = pythonPath
 	env.RootDir = filepath.Dir(filepath.Dir(pythonPath))
-
-	if progressCallback != nil {
-		progressCallback("Found system Python", 10, 100)
-	}
 
 	// Get Python version
 	versionCmd := exec.Command(pythonPath, "--version")
@@ -264,10 +260,6 @@ func CreateEnvironmentFromExacutable(pythonPath string, progressCallback Progres
 		return nil, fmt.Errorf("error parsing Python version: %v", err)
 	}
 
-	if progressCallback != nil {
-		progressCallback("Got Python version", 20, 100)
-	}
-
 	// Get site-packages path
 	sitePackagesCmd := exec.Command(pythonPath, "-c", "import site; print(site.getsitepackages()[0])")
 	sitePackagesOutput, err := sitePackagesCmd.Output()
@@ -276,10 +268,6 @@ func CreateEnvironmentFromExacutable(pythonPath string, progressCallback Progres
 	}
 
 	env.SitePackagesPath = strings.TrimSpace(string(sitePackagesOutput))
-
-	if progressCallback != nil {
-		progressCallback("Got site-packages path", 30, 100)
-	}
 
 	// Get pip path
 	pipCmd := "pip3"
@@ -301,10 +289,6 @@ func CreateEnvironmentFromExacutable(pythonPath string, progressCallback Progres
 		}
 	}
 
-	if progressCallback != nil {
-		progressCallback("Found pip", 40, 100)
-	}
-
 	// Get pip version
 	pipVersionCmd := exec.Command(env.PipPath, "--version")
 	pipVersionOutput, err := pipVersionCmd.Output()
@@ -316,10 +300,6 @@ func CreateEnvironmentFromExacutable(pythonPath string, progressCallback Progres
 	env.PipVersion, err = ParsePipVersion(pipVersionStr)
 	if err != nil {
 		return nil, fmt.Errorf("error parsing pip version: %v", err)
-	}
-
-	if progressCallback != nil {
-		progressCallback("Got pip version", 50, 100)
 	}
 
 	// Set other paths
@@ -345,10 +325,6 @@ func CreateEnvironmentFromExacutable(pythonPath string, progressCallback Progres
 		env.PythonLibPath = filepath.Join(env.PythonLibPath, fmt.Sprintf("libpython%s.so", env.PythonVersion.MinorString()))
 	}
 
-	if progressCallback != nil {
-		progressCallback("Got Python lib path", 60, 100)
-	}
-
 	// Get Python headers path
 	headersPathCmd := "import sysconfig; print(sysconfig.get_path('include'))"
 	headersPathCmdExec := exec.Command(pythonPath, "-c", headersPathCmd)
@@ -359,10 +335,6 @@ func CreateEnvironmentFromExacutable(pythonPath string, progressCallback Progres
 
 	env.PythonHeadersPath = strings.TrimSpace(string(headersPathOutput))
 
-	if progressCallback != nil {
-		progressCallback("Got Python headers path", 70, 100)
-	}
-
 	// Set EnvLibPath
 	env.EnvLibPath = filepath.Dir(env.PythonLibPath)
 
@@ -370,14 +342,10 @@ func CreateEnvironmentFromExacutable(pythonPath string, progressCallback Progres
 	env.MicromambaPath = ""
 	env.MicromambaVersion = Version{}
 
-	if progressCallback != nil {
-		progressCallback("Environment setup complete", 100, 100)
-	}
-
 	return env, nil
 }
 
-func CreateEnvironmentFromSystem(progressCallback ProgressCallback) (*Environment, error) {
+func CreateEnvironmentFromSystem() (*Environment, error) {
 	pythonPath := ""
 	if runtime.GOOS == "windows" {
 		// windows is a gruesome OS, so we need to hunt for the correct python executable
@@ -421,7 +389,7 @@ func CreateEnvironmentFromSystem(progressCallback ProgressCallback) (*Environmen
 		}
 	}
 
-	return CreateEnvironmentFromExacutable(pythonPath, progressCallback)
+	return CreateEnvironmentFromExacutable(pythonPath)
 }
 
 func CreateVenvEnvironment(baseEnv *Environment, venvPath string, options VenvOptions, progressCallback ProgressCallback) (*Environment, error) {

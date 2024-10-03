@@ -62,7 +62,7 @@ type Package struct {
 	Packages []Package
 }
 
-// PythonProgram represents a Python program with its main module and packages
+// PythonProgram represents a Python program with its main module and supporting packages and modules
 type PythonProgram struct {
 	Name     string
 	Path     string
@@ -119,7 +119,7 @@ func NewModuleFromString(name, original_path string, source string) *Module {
 	}
 }
 
-// New function to create a Package
+// NewPackage creates a new package from a collection of modules
 func NewPackage(name, path string, modules []Module) *Package {
 	return &Package{
 		Name:    name,
@@ -187,7 +187,7 @@ func newPackageFromFS(name string, sourcepath string, rootpath string, fs embed.
 	return retv, nil
 }
 
-// New Package from an embed.FS
+// New Package from an embed.FS containing the package structure and source files
 func NewPackageFromFS(name string, sourcepath string, rootpath string, fs embed.FS) (*Package, error) {
 	// the embedded filesystem should be a directory
 
@@ -275,10 +275,8 @@ func (env *Environment) NewPythonProcessFromProgram(program *PythonProgram, envi
 
 	// Set environment variables
 	cmd.Env = os.Environ()
-	if environment_vars != nil {
-		for key, value := range environment_vars {
-			cmd.Env = append(cmd.Env, key+"="+value)
-		}
+	for key, value := range environment_vars {
+		cmd.Env = append(cmd.Env, key+"="+value)
 	}
 
 	// Create pipes for the input, output, and error of the script
@@ -357,13 +355,13 @@ func (env *Environment) NewPythonProcessFromString(script string, environment_va
 
 	// Create the command with the bootstrap script
 	// We want stdin/stdout to unbuffered (-u) and to run the bootstrap script
-	// The "-c" flag is used to pass the script as an argument and terminates the python option list
+	// The "-c" flag is used to pass the script as an argument and terminates the python option list.
 	bootloader := procTemplate(primaryBootstrapScriptTemplate, TemplateData{PipeNumber: int(reader.Fd())})
 	fullArgs := append([]string{"-u", "-c", bootloader}, args...)
 	cmd := exec.Command(env.PythonPath, fullArgs...)
 
 	// Pass the file descriptor using ExtraFiles
-	// prepend our reader to the list of extra files and assign
+	// prepend our reader to the list of extra files so it is always the first file descriptor
 	extrafiles = append([]*os.File{reader, pipein_writer_primary, pipeout_reader_primary}, extrafiles...)
 	setExtraFiles(cmd, extrafiles)
 
@@ -371,10 +369,8 @@ func (env *Environment) NewPythonProcessFromString(script string, environment_va
 	cmd.Env = os.Environ()
 
 	// set the environment variables if they are provided
-	if environment_vars != nil {
-		for key, value := range environment_vars {
-			cmd.Env = append(cmd.Env, key+"="+value)
-		}
+	for key, value := range environment_vars {
+		cmd.Env = append(cmd.Env, key+"="+value)
 	}
 
 	// Create pipes for the input, output, and error of the script

@@ -52,7 +52,8 @@ def read_shared_numpy_array(shm):
 
     # Create NumPy array from shared memory
     arr = np.frombuffer(buf[metadata_size:metadata_size + expected_size], dtype=full_dtype).reshape(shape)
-
+    arr.fill(4)
+    
     return arr
 
 # open the named semaphore

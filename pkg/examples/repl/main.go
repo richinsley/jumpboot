@@ -11,7 +11,7 @@ import (
 )
 
 func main() {
-	env, err := jumpboot.CreateEnvironmentFromSystem(nil)
+	env, err := jumpboot.CreateEnvironmentFromSystem()
 	if err != nil {
 		fmt.Printf("Error creating environment: %v\n", err)
 		return
