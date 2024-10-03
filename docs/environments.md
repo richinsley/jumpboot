@@ -7,7 +7,11 @@
     - [Venv](#Venv)
     - [Progress function](#Progress-function)
 - [Managing Pip Packages](#Managing-Pip-Packages)
-
+    - [Installing a Single Package](#Installing-a-Single-Package)
+    - [Installing Multiple Packages](#Installing-Multiple-Packages)
+    - [Installing from a Requirements File](#Installing-from-a-Requirements-File)    
+    - [Additional Options](#Additional-Options)
+    - [Pip example with Custom Options](#Pip-example-with-Custom-Options)
 ## Creating Python Environments
 JumpBoot provides functionality to create and manage Python environments in various ways. It supports creating environments from system-installed Python, using [Micromamba](https://mamba.readthedocs.io/en/latest/user_guide/micromamba.html) to generate environments with specific Python versions, and creating virtual environments (venvs) from existing JumpBoot environments.
 
@@ -204,7 +208,7 @@ All pip installation methods support the following options:
 * no_cache: Set this to true to prevent pip from using its cache during installation.
 * progressCallback: All methods accept a progress callback function to track the installation progress.
 
-### Example with Custom Options
+### Pip example with Custom Options
 ```go
 packages := []string{"numpy", "pandas"}
 indexUrl := "https://pypi.org/simple"
