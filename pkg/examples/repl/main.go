@@ -16,7 +16,7 @@ func main() {
 		fmt.Printf("Error creating environment: %v\n", err)
 		return
 	}
-	repl, _ := env.NewREPLPythonProcess(nil, nil)
+	repl, _ := env.NewREPLPythonProcess(nil, nil, nil, nil)
 	defer repl.Close()
 
 	// copy output from the Python script

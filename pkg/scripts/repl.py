@@ -8,6 +8,10 @@ import io
 import jumpboot
 DELIMITER = "\x01\x02\x03\n"  # Custom delimiter with non-visible ASCII characters
 
+# import debugpy
+# debugpy.listen(("localhost", 5678))
+# debugpy.wait_for_client()
+
 class REPLInterpreter(code.InteractiveConsole):
 
     def __init__(self, locals=None):
@@ -60,6 +64,7 @@ def run_repl(input_pipe, output_pipe):
     repl = REPLInterpreter()
     code_buffer = ""  # Buffer for multiline code input
     gotdelim = False
+    # breakpoint()
 
     while True:
         try:
@@ -95,9 +100,13 @@ def run_repl(input_pipe, output_pipe):
             global_output_pipe.flush()
 
         except Exception as e:
-            # Write the error traceback to the output pipe
-            global_output_pipe.write(f"Error: {traceback.format_exc()}{DELIMITER}")
-            global_output_pipe.flush()
+            # if excetion is broken pipe, then exit
+            if isinstance(e, OSError) and e.errno == 32:
+                break
+            else:
+                # Write the error traceback to the output pipe
+                global_output_pipe.write(f"Error: {traceback.format_exc()}{DELIMITER}")
+                global_output_pipe.flush()
 
 if __name__ == "__main__":
     run_repl(jumpboot.Pipe_in, jumpboot.Pipe_out)

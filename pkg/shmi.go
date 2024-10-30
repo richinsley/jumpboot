@@ -10,8 +10,9 @@ import (
 // SharedMemory a cross-platform shared memory object
 type SharedMemory struct {
 	// shmi is the underlying platform shared memory object
-	m   *shmi
-	pos int64
+	m    *shmi
+	pos  int64
+	Name string
 }
 
 func (o *SharedMemory) GetSize() int {
@@ -28,7 +29,7 @@ func CreateSharedMemory(name string, size int) (*SharedMemory, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &SharedMemory{m, 0}, nil
+	return &SharedMemory{m, 0, name}, nil
 }
 
 // Open open existing shared memory with the given name
@@ -37,7 +38,7 @@ func OpenSharedMemory(name string, size int) (*SharedMemory, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &SharedMemory{m, 0}, nil
+	return &SharedMemory{m, 0, name}, nil
 }
 
 // Close and discard shared memory
@@ -129,6 +130,10 @@ func (o *SharedMemory) GetInt64Slice(offset int) []int64 {
 func (o *SharedMemory) GetByteSlice(offset int) []byte {
 	return GetTypedSlice[byte](o, offset)
 }
+
+// memcpy in go:
+// https://go.dev/play/p/MFJjHhDZatl
+// https://stackoverflow.com/questions/69816793/golang-fast-alternative-to-memcpy
 
 func copySlice2Ptr(b []byte, p uintptr, off int64, size int) int {
 	h := reflect.SliceHeader{}

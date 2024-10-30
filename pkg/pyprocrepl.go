@@ -28,18 +28,24 @@ type REPLPythonProcess struct {
 // NewREPLPythonProcess creates a new Python process that can execute code in a REPL-like manner
 // kvpairs parameter is a map of key-value pairs to pass to the Python process that are accessible in the Python code via the jumpboot module.
 // environment_vars parameter is a map of environment variables to set in the Python process.
-func (env *Environment) NewREPLPythonProcess(kvpairs map[string]interface{}, environment_vars map[string]string) (*REPLPythonProcess, error) {
+func (env *Environment) NewREPLPythonProcess(kvpairs map[string]interface{}, environment_vars map[string]string, modules []Module, packages []Package) (*REPLPythonProcess, error) {
 	cwd, _ := os.Getwd()
+	if modules == nil {
+		modules = []Module{}
+	}
+	if packages == nil {
+		packages = []Package{}
+	}
 	program := &PythonProgram{
 		Name: "JumpBootREPL",
 		Path: cwd,
 		Program: Module{
 			Name:   "__main__",
-			Path:   path.Join(cwd, "modules", "main.py"),
+			Path:   path.Join(cwd, "modules", "repl.py"),
 			Source: base64.StdEncoding.EncodeToString([]byte(replScript)),
 		},
-		Modules:  []Module{},
-		Packages: []Package{},
+		Modules:  modules,
+		Packages: packages,
 		KVPairs:  kvpairs,
 		// KVPairs:  map[string]interface{}{"SHARED_MEMORY_NAME": name, "SHARED_MEMORY_SIZE": size, "SEMAPHORE_NAME": semaphore_name},
 	}
@@ -94,6 +100,10 @@ func (rpp *REPLPythonProcess) Execute(code string, combinedOutput bool) (string,
 		rpp.combinedOutput = combinedOutput
 	}
 
+	// remove empty lines from the code - account for \r\n line endings on Windows
+	code = strings.ReplaceAll(code, "\r\n", "\n")
+	code = strings.ReplaceAll(code, "\n\n", "\n")
+
 	// trim whitespace from the end of the code
 	code = strings.TrimRight(code, " \t\n\r")
 
@@ -125,14 +135,14 @@ func (rpp *REPLPythonProcess) Execute(code string, combinedOutput bool) (string,
 				output := strings.TrimSuffix(result.String(), WINDELIMITER)
 				output = strings.TrimRight(output, "\n\r")
 				return output, nil
-			} else {
-				// Check if we've received the complete output (marked by the delimiter)
-				if strings.HasSuffix(result.String(), DELIMITER) {
-					// Trim the delimiter and any trailing newline/carriage return from the output
-					output := strings.TrimSuffix(result.String(), DELIMITER)
-					output = strings.TrimRight(output, "\n\r")
-					return output, nil
-				}
+			}
+		} else {
+			// Check if we've received the complete output (marked by the delimiter)
+			if strings.HasSuffix(result.String(), DELIMITER) {
+				// Trim the delimiter and any trailing newline/carriage return from the output
+				output := strings.TrimSuffix(result.String(), DELIMITER)
+				output = strings.TrimRight(output, "\n\r")
+				return output, nil
 			}
 		}
 
