@@ -6,7 +6,7 @@
 
 Jumpboot is a Go library that simplifies integrating Python into your Go applications.  It provides a robust and flexible way to:
 
-*   **Create and manage isolated Python environments** using either [micromamba](https://mamba.readthedocs.io/en/latest/micromamba-installation.html) (a fast, lightweight conda implementation) or standard Python `venv`.
+*   **Create and manage isolated Python environments** using either [micromamba](https://mamba.readthedocs.io/en/latest/user_guide/micromamba.html) (a fast, lightweight conda implementation) or standard Python `venv`.
 *   **Install Python packages** via both `pip` and `conda` (through micromamba).
 *   **Run Python code** in several ways:
     *   Execute Python scripts.
