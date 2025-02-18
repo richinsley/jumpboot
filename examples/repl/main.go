@@ -4,18 +4,25 @@ import (
 	_ "embed"
 	"fmt"
 	"io"
+	"log"
 	"os"
+	"path/filepath"
 	"time"
 
 	jumpboot "github.com/richinsley/jumpboot"
 )
 
 func main() {
-	env, err := jumpboot.CreateEnvironmentFromSystem()
+	cwd, _ := os.Getwd()
+	rootDirectory := filepath.Join(cwd, "..", "environments")
+	version := "3.12"
+
+	fmt.Println("Creating jumpboot Python environment")
+	env, err := jumpboot.CreateEnvironmentMamba("myenv", rootDirectory, version, "conda-forge", nil)
 	if err != nil {
-		fmt.Printf("Error creating environment: %v\n", err)
-		return
+		log.Fatalf("Failed to create environment: %v", err)
 	}
+
 	repl, _ := env.NewREPLPythonProcess(nil, nil, nil, nil)
 	defer repl.Close()
 

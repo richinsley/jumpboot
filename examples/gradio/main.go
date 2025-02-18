@@ -46,12 +46,14 @@ func main() {
 	rootDirectory := filepath.Join(cwd, "..", "environments")
 	version := "3.12"
 
+	fmt.Println("Creating jumpboot Python environment")
 	env, err := jumpboot.CreateEnvironmentMamba("gradio_env", rootDirectory, version, "conda-forge", nil)
 	if err != nil {
 		log.Fatalf("Failed to create environment: %v", err)
 	}
 
 	if env.IsNew {
+		fmt.Println("Installing Gradio package")
 		err = env.PipInstallPackage("gradio", "", "", false, nil)
 		if err != nil {
 			log.Fatalf("Failed to install gradio: %v", err)
