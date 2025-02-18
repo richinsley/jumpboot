@@ -1,12 +1,15 @@
-# json queue requirements
 import json
-import select
 import time
 
 class JSONQueue:
     def __init__(self, read_pipe, write_pipe):
         self.read_pipe = read_pipe
         self.write_pipe = write_pipe
+        # Make read pipe non-blocking on Windows
+        import os
+        if os.name == 'nt':  # Windows
+            import msvcrt
+            msvcrt.setmode(self.read_pipe.fileno(), os.O_BINARY)
 
     def put(self, obj, block=True, timeout=None):
         try:
@@ -25,50 +28,53 @@ class JSONQueue:
             return self._read_non_blocking()
 
     def _write_with_timeout(self, data, timeout):
-        start_time = time.time()
-        while True:
-            _, ready_to_write, _ = select.select([], [self.write_pipe], [], timeout)
-            if ready_to_write:
-                self.write_pipe.write(data)
-                self.write_pipe.flush()
-                return
-            if timeout is not None and time.time() - start_time >= timeout:
-                raise TimeoutError("Write operation timed out")
-
-    def _write_non_blocking(self, data):
-        _, ready_to_write, _ = select.select([], [self.write_pipe], [], 0)
-        if ready_to_write:
+        try:
             self.write_pipe.write(data)
             self.write_pipe.flush()
-        else:
+        except BlockingIOError:
+            if timeout is not None:
+                raise TimeoutError("Write operation timed out")
+            # Keep trying if no timeout specified
+            while True:
+                try:
+                    self.write_pipe.write(data)
+                    self.write_pipe.flush()
+                    break
+                except BlockingIOError:
+                    time.sleep(0.001)  # Small sleep to prevent busy waiting
+
+    def _write_non_blocking(self, data):
+        try:
+            self.write_pipe.write(data)
+            self.write_pipe.flush()
+        except BlockingIOError:
             raise BlockingIOError("Write would block")
 
     def _read_with_timeout(self, timeout):
         start_time = time.time()
         buffer = ""
         while True:
-            ready_to_read, _, _ = select.select([self.read_pipe], [], [], timeout)
-            if ready_to_read:
+            try:
                 chunk = self.read_pipe.readline()
                 if not chunk:
                     raise EOFError("Pipe closed")
                 buffer += chunk
                 if buffer.endswith('\n'):
                     return json.loads(buffer.strip())
-            if timeout is not None:
-                elapsed = time.time() - start_time
-                if elapsed >= timeout:
-                    raise TimeoutError("Read operation timed out")
-                timeout = max(0, timeout - elapsed)
+            except BlockingIOError:
+                if timeout is not None:
+                    elapsed = time.time() - start_time
+                    if elapsed >= timeout:
+                        raise TimeoutError("Read operation timed out")
+                time.sleep(0.001)  # Small sleep to prevent busy waiting
 
     def _read_non_blocking(self):
-        ready_to_read, _, _ = select.select([self.read_pipe], [], [], 0)
-        if ready_to_read:
+        try:
             data = self.read_pipe.readline()
             if not data:
                 raise EOFError("Pipe closed")
             return json.loads(data.strip())
-        else:
+        except BlockingIOError:
             raise BlockingIOError("Read would block")
 
     def close(self):
