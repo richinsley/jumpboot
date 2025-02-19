@@ -6,6 +6,30 @@ import importlib
 import linecache
 from importlib.abc import Loader, MetaPathFinder
 from importlib.util import spec_from_file_location
+import threading
+import time
+import signal
+
+def watchdog_monitor_parent():
+    parent_pid = os.getppid()
+    while True:
+        try:
+            if sys.platform == "win32":
+                # Windows-specific check
+                import ctypes
+                kernel32 = ctypes.windll.kernel32
+                SYNCHRONIZE = 0x00100000
+                process = kernel32.OpenProcess(SYNCHRONIZE, False, parent_pid)
+                if process == 0:  # Failed to open process
+                    os._exit(1)
+                kernel32.CloseHandle(process)
+            else:
+                # Unix-like systems (Linux and macOS)
+                os.kill(parent_pid, 0)  # This raises OSError if process is dead
+            time.sleep(3)
+        except (OSError, Exception):
+            # Process is dead or inaccessible
+            os._exit(1)
 
 def debug_out(msg):
     # print(msg, file=sys.Pipe_out)
@@ -287,5 +311,9 @@ if 'DebugPort' in program_data and program_data['DebugPort'] is not None and pro
     if 'BreakOnStart' in program_data and program_data['BreakOnStart']:
         breakpoint()
 
+# watchdog to monitor for the parent process - if the parent process dies, then exit the child process
+# Start the monitor thread as daemon (so it won't prevent program exit)
+monitor_thread = threading.Thread(target=watchdog_monitor_parent, daemon=True)
+monitor_thread.start()
 
 loader.exec_module(main_module)
