@@ -22,7 +22,7 @@ func main() {
 	// Specify the binary folder to place micromamba in
 	cwd, _ := os.Getwd()
 	rootDirectory := filepath.Join(cwd, "..", "environments")
-	fmt.Println("Creating Jumpboot repo at: ", rootDirectory)
+	fmt.Println("Creating Jumpboot env at: ", rootDirectory)
 	version := "3.12"
 	env, err := jumpboot.CreateEnvironmentMamba("myenv"+version, rootDirectory, version, "conda-forge", nil)
 	if err != nil {

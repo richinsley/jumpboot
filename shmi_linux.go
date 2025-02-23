@@ -14,18 +14,21 @@ package jumpboot
 #include <unistd.h>
 
 int _create(const char* name, int size, int flag) {
-	mode_t mode = S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP;
+    shm_unlink(name);  // Clean up any stale segment
 
-	int fd = shm_open(name, flag, mode);
-	if (fd < 0) {
-		return -1;
-	}
+    mode_t mode = S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP;
 
-	if (ftruncate(fd, size) != 0) {
-		close(fd);
-		return -2;
-	}
-	return fd;
+    int fd = shm_open(name, flag | O_CREAT, mode);
+    if (fd < 0) {
+        return -1;
+    }
+
+    if (ftruncate(fd, size) != 0) {
+        close(fd);
+        shm_unlink(name);
+        return -2;
+    }
+    return fd;
 }
 
 int Create(const char* name, int size) {

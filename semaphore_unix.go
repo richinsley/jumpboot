@@ -14,6 +14,9 @@ package jumpboot
 sem_t* create_semaphore(const char* name, int value) {
     #ifdef __APPLE__
     sem_t* sem = sem_open(name, O_CREAT, 0644, value);
+	if (sem == SEM_FAILED) {
+		return NULL;
+	}
     #else
     sem_t* sem = sem_open(name, O_CREAT, 0644, value);
     if (sem == SEM_FAILED) {

@@ -13,26 +13,25 @@ package jumpboot
 #include <sys/errno.h>
 
 int _create(const char* name, int size, int flag) {
-	mode_t mode = S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP;
+    // First try to remove any existing segment in that name
+    shm_unlink(name);  // It's okay if this fails
 
-	int fd = shm_open(name, flag, mode);
-	if (fd < 0) {
-		return -1;
-	}
+    mode_t mode = S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP;
 
-	struct stat mapstat;
-	int ret = fstat(fd, &mapstat);
-	if (ret != -1 && mapstat.st_size == 0) {
-		if (ftruncate(fd, size) != 0) {
-			close(fd);
-			return -2;
-		}
-	} else if (ret == -1) {
-		close(fd);
-		return -3;
-	}
+    int fd = shm_open(name, flag | O_CREAT, mode);
+    if (fd < 0) {
+        return -1;
+    }
 
-	return fd;
+    // Single ftruncate call is sufficient
+    if (ftruncate(fd, size) != 0) {
+        int err = errno;  // Save errno for debugging
+        close(fd);
+        shm_unlink(name);
+        return -2;
+    }
+
+    return fd;
 }
 
 int Create(const char* name, int size) {

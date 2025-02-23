@@ -23,6 +23,11 @@ func CreateSharedNumPyArray[T any](name string, shape []int) (*SharedMemory, int
 		return nil, 0, err
 	}
 
+	if shm.GetPtr() == nil && totalSize > 0 {
+		shm.Close() // Close before returning the error
+		return nil, 0, fmt.Errorf("shared memory mapping failed (nil pointer)")
+	}
+
 	// Get the byte slice for metadata
 	metadataSlice := unsafe.Slice((*byte)(shm.GetPtr()), metadataSize)
 

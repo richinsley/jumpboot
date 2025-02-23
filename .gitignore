@@ -25,3 +25,4 @@ go.work.sum
 .env
 environments/
 gather.py
+combined_files.txt
