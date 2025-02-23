@@ -47,10 +47,20 @@ This example demonstrates how to integrate OpenCV computer vision functions (wri
 * Fyne (install with `go get fyne.io/fyne/v2`)
 
 ## Running the Example
-
-1.  **Save:** Save the Go code as `main.go` and the Python code as `modules/opencv_processor.py`.
-2.  **Build:** From the directory containing `main.go`, run `go build`.
-3.  **Run:** Execute the compiled binary.
+MacOS/Linux:
+```bash
+cd examples/opencv_gui
+go mod tidy
+go run main.go
+```
+Windows (Powershell): 
+```powershell
+cd examples\opencv_gui
+go mod tidy
+# Fyne requires CGO on Windows :(
+$env:CGO_ENABLED = "1"
+go run main.go
+```
 
 A window will appear displaying the live camera feed with edge detection applied. You can click the buttons to switch between processing modes.
 

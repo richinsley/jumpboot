@@ -15,14 +15,10 @@ def watchdog_monitor_parent():
     while True:
         try:
             if sys.platform == "win32":
-                # Windows-specific check
-                import ctypes
-                kernel32 = ctypes.windll.kernel32
-                SYNCHRONIZE = 0x00100000
-                process = kernel32.OpenProcess(SYNCHRONIZE, False, parent_pid)
-                if process == 0:  # Failed to open process
+                # Check if the parent PID changed, which happens when parent dies
+                current_ppid = os.getppid()
+                if current_ppid != parent_pid:
                     os._exit(1)
-                kernel32.CloseHandle(process)
             else:
                 # Unix-like systems (Linux and macOS)
                 os.kill(parent_pid, 0)  # This raises OSError if process is dead
