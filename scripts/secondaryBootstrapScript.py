@@ -28,7 +28,7 @@ def watchdog_monitor_parent():
             os._exit(1)
 
 def debug_out(msg):
-    # print(msg, file=sys.Pipe_out)
+    # print(f"DEBUG BOOTSTRAP: {msg}", file=sys.stderr, flush=True)
     pass
 
 def initialize_packages(modules):
