@@ -8,6 +8,7 @@ from importlib.abc import Loader, MetaPathFinder
 from importlib.util import spec_from_file_location
 import threading
 import time
+import traceback
 import signal
 
 def watchdog_monitor_parent():
@@ -235,8 +236,10 @@ with sys.__jbo(fd_program, 'r') as f_program:
 # Set up pipes
 fd_out = program_data['PipeOut']
 fd_in = program_data['PipeIn']
+fd_status = program_data['StatusIn']
 f_out = sys.__jbo(fd_out, 'w')
 f_in = sys.__jbo(fd_in, 'r')
+f_status = sys.__jbo(fd_status, 'w')
 
 # Process extra file descriptors
 extra_file_count = int(sys.argv[1])
@@ -273,10 +276,11 @@ if modules is not None:
 jumpboot_package = importlib.import_module('jumpboot')
 
 if jumpboot_package is not None:
-    # Attach pipes to jumpboot.Pipe_in and jumpboot.Pipe_out
+    # Attach pipes to jumpboot.Pipe_in, jumpboot.Pipe_out, and jumpboot.Status_in
     setattr(jumpboot_package, "Pipe_in", f_in)
     setattr(jumpboot_package, "Pipe_out", f_out)
-    
+    setattr(jumpboot_package, "Status_in", f_status)
+
     # process the the KVPairs.  Assign each key value pair to jumpboot package so that it is available as jumpboot.key
     if 'KVPairs' in program_data and program_data['KVPairs'] is not None:
         for key, value in program_data['KVPairs'].items():
@@ -312,4 +316,27 @@ if 'DebugPort' in program_data and program_data['DebugPort'] is not None and pro
 monitor_thread = threading.Thread(target=watchdog_monitor_parent, daemon=True)
 monitor_thread.start()
 
-loader.exec_module(main_module)
+# loader.exec_module(main_module)
+
+try:
+    loader.exec_module(main_module)
+except Exception as e:
+    # Signal exception
+    exception_info = {
+        "type": "exception",
+        "exception": type(e).__name__,
+        "message": str(e),
+        "traceback": traceback.format_exc(),
+    }
+    print("Exception:", exception_info, file=sys.stderr)
+    f_status.write(json.dumps(exception_info) + "\n")
+    f_status.flush()
+finally:
+    # Signal completion
+    exception_info = {
+        "type": "status",
+        "message": "exit",
+    }
+    print("Exiting")
+    f_status.write(json.dumps(exception_info) + "\n")
+    f_status.flush()

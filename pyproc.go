@@ -1,6 +1,7 @@
 package jumpboot
 
 import (
+	"bufio"
 	"bytes"
 	"embed"
 	"encoding/base64"
@@ -31,13 +32,13 @@ var jumpboot_package embed.FS
 
 // PythonProcess represents a running Python process with its I/O pipes
 type PythonProcess struct {
-	Cmd     *exec.Cmd
-	Stdin   io.WriteCloser
-	Stdout  io.ReadCloser
-	Stderr  io.ReadCloser
-	PipeIn  *os.File
-	PipeOut *os.File
-	script  io.WriteCloser // For writing the secondary bootstrap script
+	Cmd      *exec.Cmd
+	Stdin    io.WriteCloser
+	Stdout   io.ReadCloser
+	Stderr   io.ReadCloser
+	PipeIn   *os.File
+	PipeOut  *os.File
+	StatusIn *os.File
 }
 
 // Module represents a Python module
@@ -71,6 +72,7 @@ type PythonProgram struct {
 	Modules  []Module
 	PipeIn   int
 	PipeOut  int
+	StatusIn int
 	// DebugPort - setting this to a non-zero value will start the debugpy server on the specified port
 	// and wait for the debugger to attach before running the program in the bootstrap script
 	DebugPort    int
@@ -244,6 +246,11 @@ func (env *Environment) NewPythonProcessFromProgram(program *PythonProgram, envi
 		return nil, nil, err
 	}
 
+	status_reader_primary, status_writer_primary, err := os.Pipe()
+	if err != nil {
+		return nil, nil, err
+	}
+
 	// get the file descriptor for the bootstrap script
 	reader_bootstrap_fd := reader_bootstrap.Fd()
 	primaryBootstrapScript := procTemplate(primaryBootstrapScriptTemplate, TemplateData{PipeNumber: int(reader_bootstrap_fd)})
@@ -253,13 +260,14 @@ func (env *Environment) NewPythonProcessFromProgram(program *PythonProgram, envi
 
 	// Pass both file descriptors using ExtraFiles
 	// this will return a list of strings with the file descriptors
-	extradescriptors := setExtraFiles(cmd, append([]*os.File{pipein_writer_primary, pipeout_reader_primary, reader_bootstrap, reader_program}, extrafiles...))
+	extradescriptors := setExtraFiles(cmd, append([]*os.File{pipein_writer_primary, pipeout_reader_primary, status_writer_primary, reader_bootstrap, reader_program}, extrafiles...))
 
 	// truncate pipein_writer_primary, pipeout_reader_primary from extradescriptors
 	// these are available as PipeIn and PipeOut in the PythonProgram struct
 	program.PipeOut, _ = strconv.Atoi(extradescriptors[0])
 	program.PipeIn, _ = strconv.Atoi(extradescriptors[1])
-	extradescriptors = extradescriptors[2:]
+	program.StatusIn, _ = strconv.Atoi(extradescriptors[2])
+	extradescriptors = extradescriptors[3:]
 
 	// At this point, cmd.Args will contain just the python path.  We can now append the "-c" flag and the primary bootstrap script
 	cmd.Args = append(cmd.Args, "-u", "-c", primaryBootstrapScript)
@@ -299,6 +307,33 @@ func (env *Environment) NewPythonProcessFromProgram(program *PythonProgram, envi
 		return nil, nil, err
 	}
 
+	// Prepare the status pipe
+	go func() {
+		defer status_writer_primary.Close()
+		statusScanner := bufio.NewScanner(status_reader_primary)
+		for statusScanner.Scan() {
+			var status map[string]interface{}
+			text := statusScanner.Text()
+			if err := json.Unmarshal([]byte(text), &status); err != nil {
+				log.Printf("Error decoding status JSON request: %v, data: %s", err, string(text))
+				break
+			}
+			if status["type"] == "status" {
+				if status["status"] == "exit" {
+					break
+				}
+			} else if status["type"] == "exception" {
+				exception, err := NewPythonExceptionFromJSON(statusScanner.Bytes())
+				if err != nil {
+					log.Printf("Error decoding Python exception: %v, %s", err, text)
+					continue
+				}
+				log.Printf("Python exception: %s", exception.ToString())
+				continue
+			}
+		}
+	}()
+
 	// Start the command
 	if err := cmd.Start(); err != nil {
 		return nil, nil, err
@@ -317,12 +352,13 @@ func (env *Environment) NewPythonProcessFromProgram(program *PythonProgram, envi
 	}()
 
 	pyProcess := &PythonProcess{
-		Cmd:     cmd,
-		Stdin:   stdinPipe,
-		Stdout:  stdoutPipe,
-		Stderr:  stderrPipe,
-		PipeIn:  pipein_reader_primary,
-		PipeOut: pipeout_writer_primary,
+		Cmd:      cmd,
+		Stdin:    stdinPipe,
+		Stdout:   stdoutPipe,
+		Stderr:   stderrPipe,
+		PipeIn:   pipein_reader_primary,
+		PipeOut:  pipeout_writer_primary,
+		StatusIn: status_reader_primary,
 	}
 
 	// Set up signal handling
@@ -353,6 +389,11 @@ func (env *Environment) NewPythonProcessFromString(script string, environment_va
 		return nil, err
 	}
 
+	status_reader_primary, status_writer_primary, err := os.Pipe()
+	if err != nil {
+		return nil, err
+	}
+
 	// Create the command with the bootstrap script
 	// We want stdin/stdout to unbuffered (-u) and to run the bootstrap script
 	// The "-c" flag is used to pass the script as an argument and terminates the python option list.
@@ -362,7 +403,7 @@ func (env *Environment) NewPythonProcessFromString(script string, environment_va
 
 	// Pass the file descriptor using ExtraFiles
 	// prepend our reader to the list of extra files so it is always the first file descriptor
-	extrafiles = append([]*os.File{reader, pipein_writer_primary, pipeout_reader_primary}, extrafiles...)
+	extrafiles = append([]*os.File{reader, pipein_writer_primary, pipeout_reader_primary, status_writer_primary}, extrafiles...)
 	setExtraFiles(cmd, extrafiles)
 
 	// set it's environment variables as our environment variables
@@ -401,12 +442,13 @@ func (env *Environment) NewPythonProcessFromString(script string, environment_va
 	}()
 
 	pyProcess := &PythonProcess{
-		Cmd:     cmd,
-		Stdin:   stdinPipe,
-		Stdout:  stdoutPipe,
-		Stderr:  stderrPipe,
-		PipeIn:  pipein_reader_primary,
-		PipeOut: pipeout_writer_primary,
+		Cmd:      cmd,
+		Stdin:    stdinPipe,
+		Stdout:   stdoutPipe,
+		Stderr:   stderrPipe,
+		PipeIn:   pipein_reader_primary,
+		PipeOut:  pipeout_writer_primary,
+		StatusIn: status_reader_primary,
 	}
 
 	// Set up signal handling
