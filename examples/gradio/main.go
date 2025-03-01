@@ -19,7 +19,7 @@ import (
 var gradioScript string
 
 // --- Go Functions ---
-// These functions are now exported (start with capital letter)
+// These functions are exported (start with capital letter)
 // so they can be called by the command handler.
 
 func Add(x, y float64) float64 {
@@ -96,9 +96,6 @@ func main() {
 		"uppercase": Uppercase,
 		"reverse":   Reverse,
 	}
-
-	// We do *not* send a "start_gui" command anymore. The Python script
-	// will start the Gradio app directly.
 
 	// Message Handling Loop (in a goroutine)
 	go func() {
@@ -190,7 +187,8 @@ func main() {
 
 			// Send response (result or error).
 			response := make(map[string]interface{})
-			if hasRequestID { // Always include request_id if it was sent
+			if hasRequestID {
+				// Always include request_id if it was sent
 				response["request_id"] = requestID
 			}
 
@@ -208,6 +206,7 @@ func main() {
 			}
 		}
 	}()
+
 	// Use a channel to signal when to exit.
 	exitChan := make(chan struct{})
 	go func() {

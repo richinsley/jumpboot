@@ -316,8 +316,6 @@ if 'DebugPort' in program_data and program_data['DebugPort'] is not None and pro
 monitor_thread = threading.Thread(target=watchdog_monitor_parent, daemon=True)
 monitor_thread.start()
 
-# loader.exec_module(main_module)
-
 try:
     loader.exec_module(main_module)
 except Exception as e:
@@ -337,6 +335,5 @@ finally:
         "type": "status",
         "message": "exit",
     }
-    print("Exiting")
     f_status.write(json.dumps(exception_info) + "\n")
     f_status.flush()

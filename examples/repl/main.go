@@ -23,7 +23,11 @@ func main() {
 		log.Fatalf("Failed to create environment: %v", err)
 	}
 
-	repl, _ := env.NewREPLPythonProcess(nil, nil, nil, nil)
+	repl, err := env.NewREPLPythonProcess(nil, nil, nil, nil)
+	if err != nil {
+		log.Fatalf("Failed to create REPL: %v", err)
+		os.Exit(1)
+	}
 	defer repl.Close()
 
 	// copy output from the Python script
@@ -77,7 +81,6 @@ func main() {
 	result, err = repl.Execute("print(1 / 0)", true)
 	if err != nil {
 		fmt.Printf("Error executing code: %v\n", err)
-		return
 	}
 	fmt.Println(result) // Output: Traceback...
 

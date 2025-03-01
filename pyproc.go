@@ -30,15 +30,23 @@ var secondaryBootstrapScriptTemplate string
 //go:embed packages/jumpboot/*.py
 var jumpboot_package embed.FS
 
+// ProcOnException is a function that is called when an exception occurs in the Python process
+type ProcOnException func(ex PythonException)
+
+// ProcOnStatus is a function that is called when the Python process sends a status message
+type ProcStatus func(status string)
+
 // PythonProcess represents a running Python process with its I/O pipes
 type PythonProcess struct {
-	Cmd      *exec.Cmd
-	Stdin    io.WriteCloser
-	Stdout   io.ReadCloser
-	Stderr   io.ReadCloser
-	PipeIn   *os.File
-	PipeOut  *os.File
-	StatusIn *os.File
+	Cmd           *exec.Cmd
+	Stdin         io.WriteCloser
+	Stdout        io.ReadCloser
+	Stderr        io.ReadCloser
+	PipeIn        *os.File
+	PipeOut       *os.File
+	StatusIn      *os.File
+	ExceptionChan chan *PythonException
+	StatusChan    chan map[string]interface{}
 }
 
 // Module represents a Python module
@@ -308,6 +316,8 @@ func (env *Environment) NewPythonProcessFromProgram(program *PythonProgram, envi
 	}
 
 	// Prepare the status pipe
+	schan := make(chan map[string]interface{}, 1)
+	echan := make(chan *PythonException, 1)
 	go func() {
 		defer status_writer_primary.Close()
 		statusScanner := bufio.NewScanner(status_reader_primary)
@@ -319,6 +329,7 @@ func (env *Environment) NewPythonProcessFromProgram(program *PythonProgram, envi
 				break
 			}
 			if status["type"] == "status" {
+				schan <- status
 				if status["status"] == "exit" {
 					break
 				}
@@ -329,7 +340,10 @@ func (env *Environment) NewPythonProcessFromProgram(program *PythonProgram, envi
 					continue
 				}
 				log.Printf("Python exception: %s", exception.ToString())
+				echan <- exception
 				continue
+			} else {
+				log.Printf("Unknown status type: %s", text)
 			}
 		}
 	}()
@@ -352,13 +366,15 @@ func (env *Environment) NewPythonProcessFromProgram(program *PythonProgram, envi
 	}()
 
 	pyProcess := &PythonProcess{
-		Cmd:      cmd,
-		Stdin:    stdinPipe,
-		Stdout:   stdoutPipe,
-		Stderr:   stderrPipe,
-		PipeIn:   pipein_reader_primary,
-		PipeOut:  pipeout_writer_primary,
-		StatusIn: status_reader_primary,
+		Cmd:           cmd,
+		Stdin:         stdinPipe,
+		Stdout:        stdoutPipe,
+		Stderr:        stderrPipe,
+		PipeIn:        pipein_reader_primary,
+		PipeOut:       pipeout_writer_primary,
+		StatusIn:      status_reader_primary,
+		ExceptionChan: echan,
+		StatusChan:    schan,
 	}
 
 	// Set up signal handling

@@ -116,6 +116,20 @@ func (rpp *REPLPythonProcess) Execute(code string, combinedOutput bool) (string,
 		return "", err
 	}
 
+	// we will receive a status or an exception first
+	var exception *PythonException = nil
+	var exerr error = nil
+	select {
+	case s := <-rpp.StatusChan:
+		fmt.Println("received", s)
+	case e := <-rpp.ExceptionChan:
+		exception = e
+	}
+
+	if exception != nil {
+		exerr = exception.Error()
+	}
+
 	// Read the output from Python and process it until we encounter the delimiter
 	reader := bufio.NewReader(rpp.PythonProcess.PipeIn)
 	var result strings.Builder
@@ -134,7 +148,7 @@ func (rpp *REPLPythonProcess) Execute(code string, combinedOutput bool) (string,
 				// Trim the delimiter and any trailing newline/carriage return from the output
 				output := strings.TrimSuffix(result.String(), WINDELIMITER)
 				output = strings.TrimRight(output, "\n\r")
-				return output, nil
+				return output, exerr
 			}
 		} else {
 			// Check if we've received the complete output (marked by the delimiter)
@@ -142,7 +156,7 @@ func (rpp *REPLPythonProcess) Execute(code string, combinedOutput bool) (string,
 				// Trim the delimiter and any trailing newline/carriage return from the output
 				output := strings.TrimSuffix(result.String(), DELIMITER)
 				output = strings.TrimRight(output, "\n\r")
-				return output, nil
+				return output, exerr
 			}
 		}
 
