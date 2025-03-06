@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -31,6 +32,14 @@ type JSONQueueProcess struct {
 
 // CommandHandler defines a function type for handling commands from Python
 type CommandHandler func(data interface{}, requestID string) (interface{}, error)
+
+type methodCall struct {
+	process       *JSONQueueProcess
+	methodName    string
+	data          map[string]interface{}
+	timeout       time.Duration
+	reflectResult bool
+}
 
 // RegisterHandler registers a handler for a specific command
 func (jq *JSONQueueProcess) RegisterHandler(command string, handler CommandHandler) {
@@ -61,7 +70,7 @@ type ParameterInfo struct {
 }
 
 // NewJSONQueueProcess creates a new PythonProcess with JSON queue communication
-func (env *Environment) NewJSONQueueProcess(program *PythonProgram, environment_vars map[string]string, extrafiles []*os.File) (*JSONQueueProcess, error) {
+func (env *Environment) NewJSONQueueProcess(program *PythonProgram, serviceStruct interface{}, environment_vars map[string]string, extrafiles []*os.File) (*JSONQueueProcess, error) {
 	pyProcess, _, err := env.NewPythonProcessFromProgram(program, environment_vars, extrafiles, false)
 	if err != nil {
 		return nil, err
@@ -78,12 +87,80 @@ func (env *Environment) NewJSONQueueProcess(program *PythonProgram, environment_
 	}()
 
 	jq := &JSONQueueProcess{
-		PythonProcess: pyProcess,
-		reader:        bufio.NewReader(pyProcess.PipeIn),
-		writer:        bufio.NewWriter(pyProcess.PipeOut),
-		responseMap:   make(map[string]chan map[string]interface{}),
-		nextID:        1,
-		methodCache:   make(map[string]MethodInfo),
+		PythonProcess:   pyProcess,
+		reader:          bufio.NewReader(pyProcess.PipeIn),
+		writer:          bufio.NewWriter(pyProcess.PipeOut),
+		responseMap:     make(map[string]chan map[string]interface{}),
+		nextID:          1,
+		methodCache:     make(map[string]MethodInfo),
+		commandHandlers: map[string]CommandHandler{},
+	}
+
+	// --- Reflect over the serviceStruct ---
+	serviceValue := reflect.ValueOf(serviceStruct)
+	serviceType := serviceValue.Type()
+
+	// Iterate over the methods of the struct
+	for i := 0; i < serviceType.NumMethod(); i++ {
+		method := serviceType.Method(i)
+
+		// Check if the method is exported (starts with uppercase)
+		if method.PkgPath != "" { // PkgPath is empty for exported methods
+			continue
+		}
+
+		// Create a CommandHandler function that uses reflection to call the method
+		handler := func(data interface{}, requestID string) (interface{}, error) {
+			// 1. Convert data to []reflect.Value (handling nil)
+			var args []reflect.Value
+			args = append(args, serviceValue) // Add the receiver first
+
+			if data != nil {
+				// Expect data to be an array/slice
+				if dataArray, ok := data.([]interface{}); ok {
+					// Check if the number of arguments matches the method signature
+					if len(dataArray) != method.Type.NumIn()-1 { // -1 to exclude the receiver
+						return nil, fmt.Errorf("incorrect number of arguments for method %s", method.Name)
+					}
+
+					// Process each argument
+					for i, arg := range dataArray {
+						paramType := method.Type.In(i + 1) // +1 to skip the receiver
+						argValue := reflect.ValueOf(arg)
+
+						// Check if the argument can be converted to the parameter type
+						if !argValue.CanConvert(paramType) {
+							return nil, fmt.Errorf("cannot convert argument %d to type %s for method %s", i, paramType, method.Name)
+						}
+
+						// Convert the argument to the correct type
+						convertedValue := argValue.Convert(paramType)
+						args = append(args, convertedValue)
+					}
+				} else {
+					return nil, fmt.Errorf("invalid data format for method %s, expected array", method.Name)
+				}
+			}
+
+			// 2. Call the method using reflection
+			results := method.Func.Call(args)
+
+			// 3. Check for errors (assume the last result is an error)
+			if len(results) > 0 {
+				if err, ok := results[len(results)-1].Interface().(error); ok && err != nil {
+					return nil, fmt.Errorf("error calling method %s: %w", method.Name, err)
+				}
+			}
+
+			// 4. Return the result (or nil if no result)
+			if len(results) > 1 {
+				return results[0].Interface(), nil
+			}
+			return nil, nil
+		}
+
+		// Register the handler
+		jq.RegisterHandler(method.Name, handler)
 	}
 
 	// Start the message processing
@@ -104,7 +181,7 @@ func (env *Environment) NewJSONQueueProcess(program *PythonProgram, environment_
 
 // discoverMethods fetches information about exposed Python methods
 func (jq *JSONQueueProcess) discoverMethods() error {
-	response, err := jq.SendCommand("__get_methods__", nil, true)
+	response, err := jq.SendCommand("__get_methods__", nil, 0, true)
 	if err != nil {
 		return err
 	}
@@ -155,8 +232,8 @@ func (jq *JSONQueueProcess) discoverMethods() error {
 }
 
 // Call dynamically calls a Python method by name with the provided arguments
-func (jq *JSONQueueProcess) Call(methodName string, args interface{}) (interface{}, error) {
-	response, err := jq.SendCommand(methodName, args, true)
+func (jq *JSONQueueProcess) Call(methodName string, timeoutSeconds int, args interface{}) (interface{}, error) {
+	response, err := jq.SendCommand(methodName, args, timeoutSeconds, true)
 	if err != nil {
 		return nil, err
 	}
@@ -368,7 +445,9 @@ func (jq *JSONQueueProcess) sendMessage(message map[string]interface{}) error {
 }
 
 // SendCommand with error handling
-func (jq *JSONQueueProcess) SendCommand(command string, data interface{}, waitForResponse bool) (map[string]interface{}, error) {
+// If waitForResponse is true, the function will wait for a response with the given timeout
+// If timeout is 0, the function will wait indefinitely for a response
+func (jq *JSONQueueProcess) SendCommand(command string, data interface{}, timeoutSeconds int, waitForResponse bool) (map[string]interface{}, error) {
 	requestID := jq.generateRequestID()
 	request := map[string]interface{}{
 		"command":    command,
@@ -394,15 +473,20 @@ func (jq *JSONQueueProcess) SendCommand(command string, data interface{}, waitFo
 		return nil, nil
 	}
 
-	// Wait for response with timeout
-	select {
-	case response := <-responseChan:
+	if timeoutSeconds <= 0 {
+		response := <-responseChan
 		return response, nil
-	case <-time.After(30 * time.Second): // 30 second timeout
-		jq.mutex.Lock()
-		delete(jq.responseMap, requestID)
-		jq.mutex.Unlock()
-		return nil, fmt.Errorf("timeout waiting for response to command: %s", command)
+	} else {
+		// Wait for response with timeout
+		select {
+		case response := <-responseChan:
+			return response, nil
+		case <-time.After(time.Duration(timeoutSeconds) * time.Second):
+			jq.mutex.Lock()
+			delete(jq.responseMap, requestID)
+			jq.mutex.Unlock()
+			return nil, fmt.Errorf("timeout waiting for response to command: %s", command)
+		}
 	}
 }
 
@@ -419,7 +503,7 @@ func (jq *JSONQueueProcess) Close() error {
 
 	// Send exit command without waiting for a response
 	fmt.Println("Sending exit command to Python process...")
-	jq.SendCommand("exit", nil, false)
+	jq.SendCommand("exit", nil, 0, false)
 
 	// Small delay to allow the command to be sent
 	time.Sleep(50 * time.Millisecond)
@@ -430,7 +514,7 @@ func (jq *JSONQueueProcess) Close() error {
 
 func (jq *JSONQueueProcess) Shutdown() error {
 	// Send shutdown command and wait for response
-	resp, err := jq.SendCommand("shutdown", nil, true)
+	resp, err := jq.SendCommand("shutdown", nil, 0, true)
 	if err != nil {
 		return fmt.Errorf("error during shutdown: %w", err)
 	}
@@ -439,4 +523,95 @@ func (jq *JSONQueueProcess) Shutdown() error {
 
 	// Wait for Python process to exit
 	return jq.PythonProcess.Wait()
+}
+
+// On specifies the Python method to be called.
+func (jq *JSONQueueProcess) On(methodName string) *methodCall {
+	return &methodCall{
+		process:    jq,
+		methodName: methodName,
+		timeout:    0, // Default timeout (wait indefinitely)
+		data:       make(map[string]interface{}),
+	}
+}
+
+// Do adds arguments to the method call.
+// It accepts a variadic number of arguments, where every odd argument is
+// expected to be a string (the parameter name) and every even argument is
+// the corresponding value.
+func (mc *methodCall) Do(args ...interface{}) *methodCall {
+	if len(args)%2 != 0 {
+		panic("invalid number of arguments: must be even")
+	}
+
+	for i := 0; i < len(args); i += 2 {
+		key, ok := args[i].(string)
+		if !ok {
+			panic("invalid argument type: even arguments must be strings")
+		}
+		mc.data[key] = args[i+1]
+	}
+
+	return mc
+}
+
+// WithTimeout sets a timeout for the method call.
+func (mc *methodCall) WithTimeout(timeout time.Duration) *methodCall {
+	mc.timeout = timeout
+	return mc
+}
+
+// Call executes the Python method with the provided arguments and timeout.
+func (mc *methodCall) Call() (interface{}, error) {
+	// ... (Add validation for parameter names and types here, potentially using GetMethodInfo)
+
+	if mc.timeout > 0 {
+		// Use SendCommand with timeout
+		response, err := mc.process.SendCommand(mc.methodName, mc.data, int(mc.timeout.Seconds()), true)
+		return extractResult(response, err)
+	}
+
+	// Use SendCommand without timeout
+	response, err := mc.process.SendCommand(mc.methodName, mc.data, 0, true)
+	return extractResult(response, err)
+}
+
+// CallReflect executes the Python method and attempts to map the result to a Go value
+// using reflection. The target must be a pointer to a value.
+func (mc *methodCall) CallReflect(target interface{}) error {
+	// ... (Add validation for parameter names and types here, potentially using GetMethodInfo)
+	mc.reflectResult = true
+	result, err := mc.Call()
+	if err != nil {
+		return err
+	}
+
+	// Use reflection to set the value of the target
+	targetValue := reflect.ValueOf(target)
+	if targetValue.Kind() != reflect.Ptr || targetValue.IsNil() {
+		return fmt.Errorf("target must be a non-nil pointer")
+	}
+
+	targetValue = targetValue.Elem()
+	resultValue := reflect.ValueOf(result)
+
+	if !resultValue.Type().AssignableTo(targetValue.Type()) {
+		return fmt.Errorf("cannot assign result of type %v to target of type %v", resultValue.Type(), targetValue.Type())
+	}
+
+	targetValue.Set(resultValue)
+	return nil
+}
+
+// Helper function to extract the result or error from the response
+func extractResult(response map[string]interface{}, err error) (interface{}, error) {
+	if err != nil {
+		return nil, fmt.Errorf("error calling Python method: %w", err)
+	}
+
+	if errMsg, ok := response["error"].(string); ok {
+		return nil, fmt.Errorf("python error: %s", errMsg)
+	}
+
+	return response["result"], nil
 }

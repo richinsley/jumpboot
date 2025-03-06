@@ -607,7 +607,8 @@ class JSONQueueServer:
         
         # Wait for the response (asynchronously)
         try:
-            return await self._wait_for_response(future, timeout, request_id)
+            response = await self._wait_for_response(future, timeout, request_id)
+            return response['result']
         except Exception as e:
             with self._lock:
                 if request_id in self._response_futures:
