@@ -96,71 +96,73 @@ func (env *Environment) NewJSONQueueProcess(program *PythonProgram, serviceStruc
 		commandHandlers: map[string]CommandHandler{},
 	}
 
-	// --- Reflect over the serviceStruct ---
-	serviceValue := reflect.ValueOf(serviceStruct)
-	serviceType := serviceValue.Type()
+	if serviceStruct != nil {
+		// --- Reflect over the serviceStruct ---
+		serviceValue := reflect.ValueOf(serviceStruct)
+		serviceType := serviceValue.Type()
 
-	// Iterate over the methods of the struct
-	for i := 0; i < serviceType.NumMethod(); i++ {
-		method := serviceType.Method(i)
+		// Iterate over the methods of the struct
+		for i := 0; i < serviceType.NumMethod(); i++ {
+			method := serviceType.Method(i)
 
-		// Check if the method is exported (starts with uppercase)
-		if method.PkgPath != "" { // PkgPath is empty for exported methods
-			continue
-		}
+			// Check if the method is exported (starts with uppercase)
+			if method.PkgPath != "" { // PkgPath is empty for exported methods
+				continue
+			}
 
-		// Create a CommandHandler function that uses reflection to call the method
-		handler := func(data interface{}, requestID string) (interface{}, error) {
-			// 1. Convert data to []reflect.Value (handling nil)
-			var args []reflect.Value
-			args = append(args, serviceValue) // Add the receiver first
+			// Create a CommandHandler function that uses reflection to call the method
+			handler := func(data interface{}, requestID string) (interface{}, error) {
+				// 1. Convert data to []reflect.Value (handling nil)
+				var args []reflect.Value
+				args = append(args, serviceValue) // Add the receiver first
 
-			if data != nil {
-				// Expect data to be an array/slice
-				if dataArray, ok := data.([]interface{}); ok {
-					// Check if the number of arguments matches the method signature
-					if len(dataArray) != method.Type.NumIn()-1 { // -1 to exclude the receiver
-						return nil, fmt.Errorf("incorrect number of arguments for method %s", method.Name)
-					}
-
-					// Process each argument
-					for i, arg := range dataArray {
-						paramType := method.Type.In(i + 1) // +1 to skip the receiver
-						argValue := reflect.ValueOf(arg)
-
-						// Check if the argument can be converted to the parameter type
-						if !argValue.CanConvert(paramType) {
-							return nil, fmt.Errorf("cannot convert argument %d to type %s for method %s", i, paramType, method.Name)
+				if data != nil {
+					// Expect data to be an array/slice
+					if dataArray, ok := data.([]interface{}); ok {
+						// Check if the number of arguments matches the method signature
+						if len(dataArray) != method.Type.NumIn()-1 { // -1 to exclude the receiver
+							return nil, fmt.Errorf("incorrect number of arguments for method %s", method.Name)
 						}
 
-						// Convert the argument to the correct type
-						convertedValue := argValue.Convert(paramType)
-						args = append(args, convertedValue)
+						// Process each argument
+						for i, arg := range dataArray {
+							paramType := method.Type.In(i + 1) // +1 to skip the receiver
+							argValue := reflect.ValueOf(arg)
+
+							// Check if the argument can be converted to the parameter type
+							if !argValue.CanConvert(paramType) {
+								return nil, fmt.Errorf("cannot convert argument %d to type %s for method %s", i, paramType, method.Name)
+							}
+
+							// Convert the argument to the correct type
+							convertedValue := argValue.Convert(paramType)
+							args = append(args, convertedValue)
+						}
+					} else {
+						return nil, fmt.Errorf("invalid data format for method %s, expected array", method.Name)
 					}
-				} else {
-					return nil, fmt.Errorf("invalid data format for method %s, expected array", method.Name)
 				}
-			}
 
-			// 2. Call the method using reflection
-			results := method.Func.Call(args)
+				// 2. Call the method using reflection
+				results := method.Func.Call(args)
 
-			// 3. Check for errors (assume the last result is an error)
-			if len(results) > 0 {
-				if err, ok := results[len(results)-1].Interface().(error); ok && err != nil {
-					return nil, fmt.Errorf("error calling method %s: %w", method.Name, err)
+				// 3. Check for errors (assume the last result is an error)
+				if len(results) > 0 {
+					if err, ok := results[len(results)-1].Interface().(error); ok && err != nil {
+						return nil, fmt.Errorf("error calling method %s: %w", method.Name, err)
+					}
 				}
+
+				// 4. Return the result (or nil if no result)
+				if len(results) > 1 {
+					return results[0].Interface(), nil
+				}
+				return nil, nil
 			}
 
-			// 4. Return the result (or nil if no result)
-			if len(results) > 1 {
-				return results[0].Interface(), nil
-			}
-			return nil, nil
+			// Register the handler
+			jq.RegisterHandler(method.Name, handler)
 		}
-
-		// Register the handler
-		jq.RegisterHandler(method.Name, handler)
 	}
 
 	// Start the message processing
