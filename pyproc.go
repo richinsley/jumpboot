@@ -27,7 +27,9 @@ var primaryBootstrapScriptTemplate string
 //go:embed scripts/secondaryBootstrapScript.py
 var secondaryBootstrapScriptTemplate string
 
-//go:embed packages/jumpboot/*.py
+// embed the contents of the jumpboot package folder and any subfolders
+//
+//go:embed packages/jumpboot/* packages/jumpboot/**/*
 var jumpboot_package embed.FS
 
 // ProcOnException is a function that is called when an exception occurs in the Python process
