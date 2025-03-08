@@ -581,29 +581,75 @@ func (mc *methodCall) Call() (interface{}, error) {
 // CallReflect executes the Python method and attempts to map the result to a Go value
 // using reflection. The target must be a pointer to a value.
 func (mc *methodCall) CallReflect(target interface{}) error {
-	// ... (Add validation for parameter names and types here, potentially using GetMethodInfo)
-	mc.reflectResult = true
+	// Get the raw result
 	result, err := mc.Call()
 	if err != nil {
 		return err
 	}
 
-	// Use reflection to set the value of the target
 	targetValue := reflect.ValueOf(target)
 	if targetValue.Kind() != reflect.Ptr || targetValue.IsNil() {
 		return fmt.Errorf("target must be a non-nil pointer")
 	}
 
-	targetValue = targetValue.Elem()
-	resultValue := reflect.ValueOf(result)
+	targetElem := targetValue.Elem()
 
-	if !resultValue.Type().AssignableTo(targetValue.Type()) {
-		return fmt.Errorf("cannot assign result of type %v to target of type %v", resultValue.Type(), targetValue.Type())
+	// Special handling for slices
+	if targetElem.Kind() == reflect.Slice {
+		resultSlice, ok := result.([]interface{})
+		if !ok {
+			return fmt.Errorf("expected slice but got %T", result)
+		}
+
+		// Convert the result to JSON and back to properly handle nested structures
+		jsonData, err := json.Marshal(resultSlice)
+		if err != nil {
+			return fmt.Errorf("failed to marshal result: %v", err)
+		}
+
+		return json.Unmarshal(jsonData, target)
 	}
 
-	targetValue.Set(resultValue)
+	// Handle non-slice types
+	resultValue := reflect.ValueOf(result)
+	if !resultValue.Type().AssignableTo(targetElem.Type()) {
+		// Try JSON conversion for complex types
+		jsonData, err := json.Marshal(result)
+		if err != nil {
+			return fmt.Errorf("failed to marshal result: %v", err)
+		}
+
+		return json.Unmarshal(jsonData, target)
+	}
+
+	targetElem.Set(resultValue)
 	return nil
 }
+
+// func (mc *methodCall) CallReflect(target interface{}) error {
+// 	// ... (Add validation for parameter names and types here, potentially using GetMethodInfo)
+// 	mc.reflectResult = true
+// 	result, err := mc.Call()
+// 	if err != nil {
+// 		return err
+// 	}
+
+// 	// Use reflection to set the value of the target
+// 	targetValue := reflect.ValueOf(target)
+// 	if targetValue.Kind() != reflect.Ptr || targetValue.IsNil() {
+// 		return fmt.Errorf("target must be a non-nil pointer")
+// 	}
+
+// 	targetValue = targetValue.Elem()
+// 	resultValue := reflect.ValueOf(result)
+
+// 	if !resultValue.Type().AssignableTo(targetValue.Type()) {
+// 		return fmt.Errorf("cannot assign result of type %v to target of type %v", resultValue.Type(), targetValue.Type())
+// 	}
+
+// 	targetValue.Set(resultValue)
+// 	return nil
+// }
 
 // Helper function to extract the result or error from the response
 func extractResult(response map[string]interface{}, err error) (interface{}, error) {

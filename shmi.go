@@ -119,12 +119,28 @@ func (o *SharedMemory) GetFloat64Slice(offset int) []float64 {
 	return GetTypedSlice[float64](o, offset)
 }
 
+func (o *SharedMemory) GetInt16Slice(offset int) []int16 {
+	return GetTypedSlice[int16](o, offset)
+}
+
 func (o *SharedMemory) GetInt32Slice(offset int) []int32 {
 	return GetTypedSlice[int32](o, offset)
 }
 
 func (o *SharedMemory) GetInt64Slice(offset int) []int64 {
 	return GetTypedSlice[int64](o, offset)
+}
+
+func (o *SharedMemory) GetUint16Slice(offset int) []uint16 {
+	return GetTypedSlice[uint16](o, offset)
+}
+
+func (o *SharedMemory) GetUint32Slice(offset int) []uint32 {
+	return GetTypedSlice[uint32](o, offset)
+}
+
+func (o *SharedMemory) GetUint64Slice(offset int) []uint64 {
+	return GetTypedSlice[uint64](o, offset)
 }
 
 func (o *SharedMemory) GetByteSlice(offset int) []byte {
