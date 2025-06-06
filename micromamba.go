@@ -15,6 +15,9 @@ import (
 // variable to allow overriding for testing.
 var micromambaBaseURL = "https://github.com/mamba-org/micromamba-releases/releases"
 
+// https://github.com/mamba-org/micromamba-releases/releases/download/micromamba-linux-64
+// https://github.com/mamba-org/micromamba-releases/releases/download/2.2.0-0/micromamba-linux-aarch64
+
 // ExpectMicromamba downloads the micromamba binary to the specified bin folder.
 // The progressCallback function is called with the download progress.
 // Returns the path to the downloaded binary.
@@ -38,6 +41,10 @@ func ExpectMicromamba(binFolder string, progressCallback ProgressCallback) (stri
 		if platform == "win" {
 			// As of now, there is not a separate arm64 download for Windows
 			arch = "64"
+		} else if platform == "linux" {
+			arch = "aarch64"
+		} else {
+			arch = "arm64"
 		}
 	default:
 		return "", fmt.Errorf("unsupported architecture: %s", arch)
@@ -45,7 +52,7 @@ func ExpectMicromamba(binFolder string, progressCallback ProgressCallback) (stri
 
 	// Construct the download URL
 	var downloadURL string
-	version := "" // Use this to specify a version, or leave empty for latest
+	version := "2.2.0-0" // Use this to specify a version, or leave empty for latest
 	if version == "" {
 		// Use the variable here!
 		downloadURL = fmt.Sprintf("%s/latest/download/%s-%s-%s", micromambaBaseURL, executableName, platform, arch)
