@@ -157,8 +157,8 @@ func (rpp *REPLPythonProcess) Execute(code string, combinedOutput bool) (string,
 	var exception *PythonException = nil
 	var exerr error = nil
 	select {
-	case s := <-rpp.StatusChan:
-		fmt.Println("received", s)
+	case <-rpp.StatusChan:
+		// Status received, continue
 	case e := <-rpp.ExceptionChan:
 		exception = e
 	}
