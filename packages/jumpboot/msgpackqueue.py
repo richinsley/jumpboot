@@ -142,15 +142,23 @@ class MessagePackTransport:
             debug_out(f"Receive complete, returning {len(result)} bytes", file=sys.stderr)
             return result
         else:
-            # For larger messages, fall back to regular read
+            # For larger messages, read in a loop (pipe reads can return partial data)
             debug_out(f"Message too large for buffer pool ({length} bytes), using direct read", file=sys.stderr)
             debug_out("Starting direct read of large message", file=sys.stderr)
-            data = self.read_pipe.read(length)
+            chunks = []
+            bytes_read = 0
+            while bytes_read < length:
+                remaining = length - bytes_read
+                debug_out(f"Reading large chunk at offset {bytes_read}/{length}", file=sys.stderr)
+                chunk = self.read_pipe.read(remaining)
+                if not chunk:
+                    debug_out("EOF during large message read", file=sys.stderr)
+                    raise EOFError("Pipe closed during read")
+                chunks.append(chunk)
+                bytes_read += len(chunk)
+                debug_out(f"Large read: {bytes_read}/{length} bytes", file=sys.stderr)
             
-            if not data:
-                debug_out("EOF during large message read", file=sys.stderr)
-                raise EOFError("Pipe closed")
-            
+            data = b"".join(chunks)
             debug_out(f"Large receive complete, returning {len(data)} bytes", file=sys.stderr)
             return data
 
