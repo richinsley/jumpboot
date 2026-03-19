@@ -14,10 +14,14 @@ import (
 	"os/exec"
 	"path"
 	"strconv"
+	"sync"
 	"syscall"
 	"text/template"
 	"time"
 )
+
+// ErrProcessExited is returned when an operation is attempted on a process that has exited.
+var ErrProcessExited = errors.New("python process has exited")
 
 //go:embed scripts/bootstrap.py
 var primaryBootstrapScriptTemplate string
@@ -33,6 +37,10 @@ type ProcOnException func(ex PythonException)
 
 // ProcStatus is a callback function invoked when the Python process sends a status message.
 type ProcStatus func(status string)
+
+// ProcessExitHandler is called when a Python process exits unexpectedly.
+// The exitErr contains the process exit information (nil if clean exit).
+type ProcessExitHandler func(exitErr error)
 
 // PythonProcess represents a running Python subprocess with communication pipes.
 //
@@ -71,6 +79,25 @@ type PythonProcess struct {
 
 	// StatusChan receives status messages (e.g., "exit") from Python.
 	StatusChan chan map[string]interface{}
+
+	// OnExit is called when the process exits. Set before starting the process
+	// monitor, or before calling MonitorProcess().
+	OnExit ProcessExitHandler
+
+	// exitOnce ensures the exit handler is called at most once.
+	exitOnce sync.Once
+
+	// exited indicates whether the process has exited.
+	exited bool
+
+	// exitErr stores the error from process exit (nil for clean exit).
+	exitErr error
+
+	// exitMu protects exited and exitErr.
+	exitMu sync.RWMutex
+
+	// exitChan is closed when the process exits, allowing waiters to unblock.
+	exitChan chan struct{}
 }
 
 // Module represents a Python module that can be embedded in a Go binary.
@@ -585,12 +612,19 @@ func (env *PythonEnvironment) NewPythonProcessFromString(script string, environm
 
 // Wait blocks until the Python process exits.
 // Returns an error if the process was killed or exited with a non-zero status.
+// If MonitorProcess is active, Wait uses the cached exit state; otherwise it
+// calls cmd.Wait() directly for backward compatibility.
 func (pp *PythonProcess) Wait() error {
+	if pp.exitChan != nil {
+		// MonitorProcess is active, wait on its channel
+		<-pp.exitChan
+		return pp.ExitError()
+	}
+	// Fallback for direct PythonProcess usage without monitoring
 	err := pp.Cmd.Wait()
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			if exitErr.ExitCode() == -1 {
-				// The child process was killed
 				return errors.New("child process was killed")
 			}
 		}
@@ -607,17 +641,29 @@ func (pp *PythonProcess) Terminate() error {
 		return nil // Process hasn't started or has already finished
 	}
 
+	// Already exited
+	if !pp.Alive() {
+		return pp.ExitError()
+	}
+
 	// Try to terminate gracefully first
 	err := pp.Cmd.Process.Signal(syscall.SIGTERM)
 	if err != nil {
 		return err
 	}
 
-	// Wait for the process to exit
-	done := make(chan error, 1)
-	go func() {
-		done <- pp.Cmd.Wait()
-	}()
+	// Use exitChan if monitor is active, otherwise spawn a waiter
+	var done <-chan struct{}
+	if pp.exitChan != nil {
+		done = pp.exitChan
+	} else {
+		d := make(chan struct{}, 1)
+		go func() {
+			pp.Cmd.Wait()
+			close(d)
+		}()
+		done = d
+	}
 
 	// Wait for the process to exit or force kill after timeout
 	select {
@@ -627,12 +673,60 @@ func (pp *PythonProcess) Terminate() error {
 		if err != nil {
 			return err
 		}
-		<-done // Wait for the process to be killed
-	case err = <-done:
+		<-done
+	case <-done:
 		// Process exited before timeout
 	}
 
-	return err
+	return pp.ExitError()
+}
+
+// Alive returns true if the Python process is still running.
+// This is a non-blocking check that reads cached state from the process monitor.
+func (pp *PythonProcess) Alive() bool {
+	pp.exitMu.RLock()
+	defer pp.exitMu.RUnlock()
+	return !pp.exited
+}
+
+// ExitError returns the error from process exit, or nil if the process
+// exited cleanly or is still running. Use Alive() to distinguish between
+// "still running" and "exited cleanly".
+func (pp *PythonProcess) ExitError() error {
+	pp.exitMu.RLock()
+	defer pp.exitMu.RUnlock()
+	return pp.exitErr
+}
+
+// ExitChan returns a channel that is closed when the process exits.
+// This allows callers to select on process exit alongside other operations.
+// Returns nil if MonitorProcess has not been called.
+func (pp *PythonProcess) ExitChan() <-chan struct{} {
+	return pp.exitChan
+}
+
+// MonitorProcess starts a background goroutine that waits for the process to exit
+// and updates the process state. It calls OnExit (if set) when the process exits.
+// This is called automatically by NewQueueProcess; call it manually only when using
+// PythonProcess directly.
+//
+// Safe to call multiple times; only the first call starts monitoring.
+func (pp *PythonProcess) MonitorProcess() {
+	pp.exitOnce.Do(func() {
+		pp.exitChan = make(chan struct{})
+		go func() {
+			err := pp.Cmd.Wait()
+			pp.exitMu.Lock()
+			pp.exited = true
+			pp.exitErr = err
+			pp.exitMu.Unlock()
+			close(pp.exitChan)
+
+			if pp.OnExit != nil {
+				pp.OnExit(err)
+			}
+		}()
+	})
 }
 
 func setupSignalHandler(pp *PythonProcess) {

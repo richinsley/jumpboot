@@ -157,13 +157,17 @@ func (env *PythonEnvironment) NewQueueProcess(program *PythonProgram, serviceStr
 		PythonProcess: pyProcess,
 		serializer:    MsgpackSerializer{},
 		transport:     NewMsgpackTransport(pyProcess.PipeIn, pyProcess.PipeOut),
-		// reader:          bufio.NewReader(pyProcess.PipeIn),
-		// writer:          bufio.NewWriter(pyProcess.PipeOut),
-		responseMap:     make(map[string]chan map[string]interface{}),
-		nextID:          1,
-		methodCache:     make(map[string]MethodInfo),
+		responseMap:   make(map[string]chan map[string]interface{}),
+		nextID:        1,
+		methodCache:   make(map[string]MethodInfo),
 		commandHandlers: map[string]CommandHandler{},
 	}
+
+	// Start process monitoring — detects crashes and unblocks pending calls
+	pyProcess.OnExit = func(exitErr error) {
+		jq.handleProcessExit(exitErr)
+	}
+	pyProcess.MonitorProcess()
 
 	if serviceStruct != nil {
 		// --- Reflect over the serviceStruct ---
@@ -547,6 +551,11 @@ func (jq *QueueProcess) sendMessage(message map[string]interface{}) error {
 //
 // Returns the response map (if waiting) or nil, and any error encountered.
 func (jq *QueueProcess) SendCommand(command string, data interface{}, timeoutSeconds int, waitForResponse bool) (map[string]interface{}, error) {
+	// Fail fast if process is dead
+	if !jq.PythonProcess.Alive() {
+		return nil, fmt.Errorf("%w: %v", ErrProcessExited, jq.PythonProcess.ExitError())
+	}
+
 	requestID := jq.generateRequestID()
 	request := map[string]interface{}{
 		"command":    command,
@@ -565,6 +574,11 @@ func (jq *QueueProcess) SendCommand(command string, data interface{}, timeoutSec
 
 	// Send the request
 	if err := jq.sendMessage(request); err != nil {
+		if waitForResponse {
+			jq.mutex.Lock()
+			delete(jq.responseMap, requestID)
+			jq.mutex.Unlock()
+		}
 		return nil, err
 	}
 
@@ -572,14 +586,33 @@ func (jq *QueueProcess) SendCommand(command string, data interface{}, timeoutSec
 		return nil, nil
 	}
 
+	// Wait for response, with process exit as an escape hatch
+	exitChan := jq.PythonProcess.ExitChan()
+
 	if timeoutSeconds <= 0 {
-		response := <-responseChan
-		return response, nil
-	} else {
-		// Wait for response with timeout
 		select {
 		case response := <-responseChan:
 			return response, nil
+		case <-exitChan:
+			// Process died while waiting — check if handleProcessExit drained our channel
+			select {
+			case response := <-responseChan:
+				return response, nil
+			default:
+				return nil, fmt.Errorf("%w: %v", ErrProcessExited, jq.PythonProcess.ExitError())
+			}
+		}
+	} else {
+		select {
+		case response := <-responseChan:
+			return response, nil
+		case <-exitChan:
+			select {
+			case response := <-responseChan:
+				return response, nil
+			default:
+				return nil, fmt.Errorf("%w: %v", ErrProcessExited, jq.PythonProcess.ExitError())
+			}
 		case <-time.After(time.Duration(timeoutSeconds) * time.Second):
 			jq.mutex.Lock()
 			delete(jq.responseMap, requestID)
@@ -587,6 +620,24 @@ func (jq *QueueProcess) SendCommand(command string, data interface{}, timeoutSec
 			return nil, fmt.Errorf("timeout waiting for response to command: %s", command)
 		}
 	}
+}
+
+// handleProcessExit is called when the Python process exits unexpectedly.
+// It marks the QueueProcess as stopped and drains all pending response channels
+// so that callers blocked in SendCommand unblock with an error.
+func (jq *QueueProcess) handleProcessExit(exitErr error) {
+	jq.mutex.Lock()
+	jq.running = false
+
+	// Drain all pending response channels so blocked callers unblock
+	for id, ch := range jq.responseMap {
+		ch <- map[string]interface{}{
+			"error":      fmt.Sprintf("python process exited: %v", exitErr),
+			"request_id": id,
+		}
+		delete(jq.responseMap, id)
+	}
+	jq.mutex.Unlock()
 }
 
 // Close stops the message loop and terminates the Python process.
