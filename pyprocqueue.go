@@ -238,11 +238,11 @@ func (env *PythonEnvironment) NewQueueProcess(program *PythonProgram, serviceStr
 		}
 	}
 
-	// Start the message processing
+	// Start the message processing.
+	// Start() is the single launch point for messageLoop; starting a second
+	// reader on the same pipe can race/corrupt MessagePack frames and strand
+	// RPC callers waiting for responses that were consumed by the wrong reader.
 	jq.Start()
-
-	// Start the message loop
-	go jq.messageLoop()
 
 	// Fetch method info from Python
 	err = jq.discoverMethods()

@@ -2,6 +2,8 @@ package jumpboot
 
 import (
 	"errors"
+	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -47,6 +49,17 @@ func getQueueProcess(t *testing.T) *QueueProcess {
 		t.Fatalf("Failed to create QueueProcess: %v", err)
 	}
 	return queue
+}
+
+func TestQueueProcess_SingleMessageLoopLaunchSite(t *testing.T) {
+	data, err := os.ReadFile("pyprocqueue.go")
+	if err != nil {
+		t.Fatalf("read pyprocqueue.go: %v", err)
+	}
+	count := strings.Count(string(data), "go jq.messageLoop()")
+	if count != 1 {
+		t.Fatalf("QueueProcess must launch exactly one messageLoop reader, found %d", count)
+	}
 }
 
 func TestQueueProcess_BasicCall(t *testing.T) {
