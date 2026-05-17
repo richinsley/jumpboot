@@ -1,6 +1,7 @@
 package jumpboot
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -340,6 +341,225 @@ func (jq *QueueProcess) Call(methodName string, timeoutSeconds int, args interfa
 	return response, nil
 }
 
+// CallContext invokes a Python method by name and respects context cancellation.
+//
+// When ctx fires, a __cancel__ command is sent to Python so the in-flight method
+// can cooperatively abort. The call then waits a brief grace period (5s) for the
+// service to return — typically with a CallCancelled error — before returning
+// ctx.Err() to the caller.
+//
+// Cooperative cancellation only: a Python method that doesn't poll its cancel
+// event will run to completion even after ctx fires (we surface ctx.Err() once
+// the response arrives or the grace period elapses). Use a tighter parent timeout
+// if you need a hard deadline.
+//
+// Part of the streaming+cancellation design (DESIGN-STREAMING-CANCEL.md in jb-mesh).
+func (jq *QueueProcess) CallContext(ctx context.Context, methodName string, args interface{}) (interface{}, error) {
+	if !jq.PythonProcess.Alive() {
+		return nil, fmt.Errorf("%w: %v", ErrProcessExited, jq.PythonProcess.ExitError())
+	}
+
+	// Fast path: ctx already done.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	requestID := jq.generateRequestID()
+	request := map[string]interface{}{
+		"command":    methodName,
+		"data":       args,
+		"request_id": requestID,
+	}
+
+	responseChan := make(chan map[string]interface{}, 1)
+	jq.mutex.Lock()
+	jq.responseMap[requestID] = responseChan
+	jq.mutex.Unlock()
+
+	if err := jq.sendMessage(request); err != nil {
+		jq.mutex.Lock()
+		delete(jq.responseMap, requestID)
+		jq.mutex.Unlock()
+		return nil, err
+	}
+
+	exitChan := jq.PythonProcess.ExitChan()
+
+	// Wait for either the response, process exit, or context cancellation.
+	select {
+	case response := <-responseChan:
+		return extractCallResult(response)
+	case <-exitChan:
+		// Process died while waiting — drain in case handleProcessExit raced us.
+		select {
+		case response := <-responseChan:
+			return extractCallResult(response)
+		default:
+			return nil, fmt.Errorf("%w: %v", ErrProcessExited, jq.PythonProcess.ExitError())
+		}
+	case <-ctx.Done():
+		// Caller cancelled. Send __cancel__ to Python so the method can stop early.
+		if cancelErr := jq.SendCancel(requestID); cancelErr != nil {
+			// Log but proceed; the natural response (or process exit) is still our exit path.
+			log.Printf("CallContext: SendCancel for %s failed: %v", requestID, cancelErr)
+		}
+		// Give cooperative handlers a brief window to surface CallCancelled before
+		// we abandon the request_id slot. Tools that don't poll won't return here;
+		// they'll keep running until the next response (which we drop) or process exit.
+		graceTimer := time.NewTimer(5 * time.Second)
+		defer graceTimer.Stop()
+		select {
+		case response := <-responseChan:
+			// Got a (typically CallCancelled-shaped) response — return ctx.Err() so
+			// callers can distinguish cancellation from a genuine python error.
+			_, _ = extractCallResult(response) // drain; ignore details
+			return nil, ctx.Err()
+		case <-graceTimer.C:
+			jq.mutex.Lock()
+			delete(jq.responseMap, requestID)
+			jq.mutex.Unlock()
+			return nil, ctx.Err()
+		case <-exitChan:
+			jq.mutex.Lock()
+			delete(jq.responseMap, requestID)
+			jq.mutex.Unlock()
+			return nil, fmt.Errorf("%w: %v", ErrProcessExited, jq.PythonProcess.ExitError())
+		}
+	}
+}
+
+// CallStream invokes a Python method and returns a channel that yields frames
+// as they arrive. Each frame is a msgpack-decoded map; the terminal frame has
+// done=true (or, for legacy single-reply responses, no "done" field at all,
+// which is treated as done=true). The returned channel is closed once the
+// terminal frame has been delivered or once ctx fires / the python process
+// exits.
+//
+// On ctx.Done, CallStream sends __cancel__ to Python (best-effort) so a
+// cooperatively-cancellable method can return early. The channel is then
+// closed without waiting for any further frames.
+//
+// Note: the request payload carries "stream": true so the Python dispatcher
+// can wire ``ctx.emit()`` to publish partial frames. Calling CallStream on a
+// method that wasn't declared @method(stream=True) still works — it just
+// yields a single terminal frame, same as Call.
+//
+// Phase 2 of DESIGN-STREAMING-CANCEL.md.
+func (jq *QueueProcess) CallStream(ctx context.Context, methodName string, args interface{}) (<-chan map[string]interface{}, error) {
+	if !jq.PythonProcess.Alive() {
+		return nil, fmt.Errorf("%w: %v", ErrProcessExited, jq.PythonProcess.ExitError())
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	requestID := jq.generateRequestID()
+	request := map[string]interface{}{
+		"command":    methodName,
+		"data":       args,
+		"request_id": requestID,
+		"stream":     true,
+	}
+
+	// Larger buffer than single-shot's 1 — gives Python a few frames of
+	// headroom if the consumer briefly stalls before backpressure kicks in.
+	rawCh := make(chan map[string]interface{}, 32)
+	jq.mutex.Lock()
+	jq.responseMap[requestID] = rawCh
+	jq.mutex.Unlock()
+
+	if err := jq.sendMessage(request); err != nil {
+		jq.mutex.Lock()
+		delete(jq.responseMap, requestID)
+		jq.mutex.Unlock()
+		return nil, err
+	}
+
+	out := make(chan map[string]interface{}, 1)
+	exitChan := jq.PythonProcess.ExitChan()
+
+	go func() {
+		defer close(out)
+		cleanup := func() {
+			jq.mutex.Lock()
+			delete(jq.responseMap, requestID)
+			jq.mutex.Unlock()
+		}
+		for {
+			select {
+			case msg, ok := <-rawCh:
+				if !ok {
+					return
+				}
+				// Deliver to caller. If caller has abandoned the channel, this
+				// goroutine leaks until process exit — documented behavior.
+				out <- msg
+				done := true // legacy single-reply: no "done" field implies terminal
+				if d, hasField := msg["done"]; hasField {
+					if dbool, ok := d.(bool); ok {
+						done = dbool
+					}
+				}
+				if done {
+					return
+				}
+			case <-ctx.Done():
+				if cancelErr := jq.SendCancel(requestID); cancelErr != nil {
+					log.Printf("CallStream: SendCancel for %s failed: %v", requestID, cancelErr)
+				}
+				cleanup()
+				return
+			case <-exitChan:
+				cleanup()
+				return
+			}
+		}
+	}()
+
+	return out, nil
+}
+
+// SendCancel asks the Python side to cancel an in-flight request_id.
+//
+// Fire-and-forget: returns once the cancel message has been written to the pipe,
+// without waiting for the cancel ack. The ack message arrives on the message loop
+// and is silently dropped because we don't register a response channel for it.
+//
+// Used by CallContext when its context fires, and exposed for higher-level
+// callers (jb-mesh per-call cancel subscriptions) that need to cancel a known
+// in-flight request from outside the call.
+func (jq *QueueProcess) SendCancel(targetRequestID string) error {
+	if !jq.PythonProcess.Alive() {
+		return fmt.Errorf("%w: %v", ErrProcessExited, jq.PythonProcess.ExitError())
+	}
+	cancelRequestID := jq.generateRequestID()
+	request := map[string]interface{}{
+		"command":    "__cancel__",
+		"data":       map[string]interface{}{"target_request_id": targetRequestID},
+		"request_id": cancelRequestID,
+	}
+	return jq.sendMessage(request)
+}
+
+// extractCallResult unpacks a Python response message into the Call/CallContext
+// return shape. Pulled out of Call so CallContext can share the logic.
+func extractCallResult(response map[string]interface{}) (interface{}, error) {
+	if errMsg, ok := response["error"].(string); ok {
+		return nil, fmt.Errorf("python error: %s", errMsg)
+	}
+	if result, ok := response["result"]; ok {
+		return result, nil
+	}
+	// Fallback: drop request_id and unwrap if exactly one field remains.
+	delete(response, "request_id")
+	if len(response) == 1 {
+		for _, v := range response {
+			return v, nil
+		}
+	}
+	return response, nil
+}
+
 // GetMethods returns the names of all discovered Python methods.
 // Methods are discovered during NewQueueProcess via introspection.
 func (jq *QueueProcess) GetMethods() []string {
@@ -405,14 +625,35 @@ func (jq *QueueProcess) messageLoop() {
 			continue
 		}
 
-		// Check if this is a response to a request
+		// Check if this is a response to a request.
+		// Phase 2: a frame is terminal when "done" is missing (legacy single-shot
+		// — preserves existing behavior) or explicitly true. A done:false frame
+		// keeps the responseMap entry alive so subsequent partials route to the
+		// same channel. The mutex is released before the channel send so a slow
+		// or abandoned consumer can't deadlock the message loop, and the send
+		// has a generous timeout that drops the frame rather than blocking
+		// forever if the consumer has gone away.
 		if requestID, ok := message["request_id"].(string); ok && !strings.HasPrefix(requestID, "py-") {
+			isTerminal := true
+			if d, hasField := message["done"]; hasField {
+				if dbool, ok := d.(bool); ok {
+					isTerminal = dbool
+				}
+			}
 			jq.mutex.Lock()
-			if ch, exists := jq.responseMap[requestID]; exists {
-				ch <- message
+			ch, exists := jq.responseMap[requestID]
+			if exists && isTerminal {
 				delete(jq.responseMap, requestID)
 			}
 			jq.mutex.Unlock()
+			if exists {
+				select {
+				case ch <- message:
+					// delivered
+				case <-time.After(5 * time.Second):
+					log.Printf("messageLoop: dropped frame for request_id %s (consumer not draining)", requestID)
+				}
+			}
 			continue
 		}
 

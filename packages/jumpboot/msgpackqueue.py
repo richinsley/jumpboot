@@ -233,10 +233,24 @@ class MessagePackQueueServer:
         self.default_handler = None
         self._response_futures = {}
         self._next_request_id = 0
-        
+
+        # Cancellation registry: maps in-flight request_id -> asyncio.Event.
+        # __cancel__ sets the event for a target request_id; cooperative handlers
+        # poll it (typically via jb-service's CallContext) to abort early.
+        # Phase 1 of the streaming+cancellation design (DESIGN-STREAMING-CANCEL.md
+        # in jb-mesh).
+        self._inflight_events: Dict[str, asyncio.Event] = {}
+
+        # Streaming registry: maps in-flight request_id -> True if the request
+        # came in with the {"stream": true} flag. Higher-level wrappers
+        # (jb-service's CallContext) consult this to decide whether
+        # ``ctx.emit(chunk)`` publishes a partial frame or is a no-op.
+        # Phase 2 of DESIGN-STREAMING-CANCEL.md.
+        self._inflight_streaming: Dict[str, bool] = {}
+
         # For thread safety when accessing shared resources
         self._lock = threading.Lock()
-        
+
         # Register built-in handlers
         self._register_builtin_handlers()
         
@@ -306,6 +320,47 @@ class MessagePackQueueServer:
 
         # Add a special handler for method inspection (useful for Go)
         self.register_handler("__get_methods__", self._handle_get_methods)
+
+        # Cooperative cancellation: Go can ask us to cancel an in-flight call.
+        self.register_handler("__cancel__", self._handle_cancel)
+
+    def get_cancel_event(self, request_id: str) -> Optional[asyncio.Event]:
+        """Return the asyncio.Event associated with an in-flight request_id.
+
+        Higher-level wrappers (e.g. jb-service's CallContext) call this to
+        observe whether the caller has cancelled the in-flight call. Returns
+        None if no call with that id is registered (already completed, never
+        existed, or fire-and-forget).
+        """
+        return self._inflight_events.get(request_id)
+
+    def is_streaming(self, request_id: str) -> bool:
+        """Return True if the in-flight request was sent with stream=True.
+
+        Higher-level wrappers consult this to decide whether ``ctx.emit(chunk)``
+        publishes a partial frame or is a no-op. Returns False if the request
+        wasn't flagged as streaming, or isn't currently in flight.
+        """
+        return self._inflight_streaming.get(request_id, False)
+
+    async def _handle_cancel(self, data, request_id):
+        """Signal cancellation of a target in-flight request.
+
+        Payload: {"target_request_id": "<id>"}. Sets the asyncio.Event for the
+        target request so cooperative handlers can stop early. Returns a small
+        ack; callers may ignore it (fire-and-forget is the typical pattern).
+        """
+        target_id = None
+        if isinstance(data, dict):
+            target_id = data.get("target_request_id")
+        if not target_id:
+            return {"ok": False, "error": "missing target_request_id"}
+        event = self._inflight_events.get(target_id)
+        if event is None:
+            # Either already completed or never existed; nothing to cancel.
+            return {"ok": False, "error": "no in-flight call", "target_request_id": target_id}
+        event.set()
+        return {"ok": True, "target_request_id": target_id}
     
     async def _handle_get_methods(self, data, request_id):
         """Return information about exposed methods for Go discovery."""
@@ -437,11 +492,15 @@ class MessagePackQueueServer:
                             
                             debug_out(f"Processing message: {message}", file=sys.stderr)
                             
-                            # Extract command, data, and request_id
+                            # Extract command, data, request_id, and the streaming flag.
+                            # ``stream: true`` (Phase 2) tells the dispatcher to construct
+                            # the per-call context with emit() wired to publish partial
+                            # frames; without the flag, emit() is a no-op.
                             command = message.get("command")
                             data = message.get("data")
                             request_id = message.get("request_id")
-                            
+                            stream = bool(message.get("stream"))
+
                             # Check if this is a response to a pending request
                             if request_id and request_id.startswith("py-"):
                                 debug_out(f"This is a response to a Python request: {request_id}", file=sys.stderr)
@@ -451,9 +510,9 @@ class MessagePackQueueServer:
                                         future.set_result(message)
                                         debug_out(f"Set result for future: {request_id}", file=sys.stderr)
                                 continue
-                            
+
                             # Process the command in a separate task
-                            asyncio.create_task(self._process_command(command, data, request_id))
+                            asyncio.create_task(self._process_command(command, data, request_id, stream))
                             
                         except Exception as e:
                             debug_out(f"Error processing future: {e}", file=sys.stderr)
@@ -523,39 +582,78 @@ class MessagePackQueueServer:
         except Exception as e:
             debug_out(f"Error processing line: {e}", file=sys.stderr)
 
-    async def _process_command(self, command: str, data: Any, request_id: Optional[str]):
+    async def _process_command(self, command: str, data: Any, request_id: Optional[str], stream: bool = False):
         """
         Process a command and send a response if needed.
+
+        ``stream`` (Phase 2): when True, the per-call entry is also flagged in
+        self._inflight_streaming so higher-level wrappers (jb-service
+        CallContext) can decide whether ``emit()`` publishes partial frames.
         """
         debug_out(f"Starting to process command: {command} with request ID: {request_id}", file=sys.stderr)
-        response = None
+        # Register a cancel event for this call so __cancel__ can signal it.
+        # Skip for the cancel command itself (no point in canceling a cancel) and
+        # for fire-and-forget requests with no request_id.
+        cancel_event: Optional[asyncio.Event] = None
+        if request_id and command != "__cancel__":
+            cancel_event = asyncio.Event()
+            self._inflight_events[request_id] = cancel_event
+            if stream:
+                self._inflight_streaming[request_id] = True
+
         try:
-            # Handle the command
-            if command in self.command_handlers:
-                debug_out(f"Found handler for command: {command}", file=sys.stderr)
-                response = await self.command_handlers[command](data, request_id)
-                debug_out(f"Handler completed for command: {command}, response: {response}", file=sys.stderr)
-            elif self.default_handler:
-                debug_out(f"Using default handler for command: {command}", file=sys.stderr)
-                response = await self.default_handler(command, data, request_id)
-                debug_out(f"Default handler completed for command: {command}", file=sys.stderr)
-            else:
-                debug_out(f"No handler found for command: {command}", file=sys.stderr)
-                response = {"error": f"Unknown command: {command}"}
-            
-            # Send a response if one was returned and there's a request_id
-            if response is not None and request_id is not None:
-                debug_out(f"Sending response for request ID: {request_id}", file=sys.stderr)
-                self.send_response(response, request_id)
-                debug_out(f"Response sent for request ID: {request_id}", file=sys.stderr)
-            
-        except Exception as e:
-            debug_out(f"Error processing command {command}: {e}", file=sys.stderr)
-            traceback.print_exc(file=sys.stderr)
-            # Send an error response if there's a request_id
-            if request_id is not None:
-                error_response = {"error": str(e), "traceback": traceback.format_exc()}
-                self.send_response(error_response, request_id)
+            response = None
+            try:
+                # Handle the command
+                if command in self.command_handlers:
+                    debug_out(f"Found handler for command: {command}", file=sys.stderr)
+                    response = await self.command_handlers[command](data, request_id)
+                    debug_out(f"Handler completed for command: {command}, response: {response}", file=sys.stderr)
+                elif self.default_handler:
+                    debug_out(f"Using default handler for command: {command}", file=sys.stderr)
+                    response = await self.default_handler(command, data, request_id)
+                    debug_out(f"Default handler completed for command: {command}", file=sys.stderr)
+                else:
+                    debug_out(f"No handler found for command: {command}", file=sys.stderr)
+                    response = {"error": f"Unknown command: {command}"}
+
+                # Send a response if one was returned and there's a request_id.
+                # For streaming requests (Phase 2), the handler may have already
+                # published partial frames via send_response({chunk, done:false});
+                # the value returned here is the terminal frame and must be
+                # wrapped as {"result": <value>, "done": True} so the Go side
+                # picks up the user's return value as StreamFrame.Result. The
+                # only exception is if the handler already produced a properly
+                # shaped terminal frame (has both "result" and "done" keys),
+                # in which case we forward it as-is.
+                if response is not None and request_id is not None:
+                    debug_out(f"Sending response for request ID: {request_id}", file=sys.stderr)
+                    if stream:
+                        already_wrapped = (
+                            isinstance(response, dict)
+                            and "done" in response
+                            and ("result" in response or "error" in response)
+                        )
+                        if not already_wrapped:
+                            response = {"result": response, "done": True}
+                    self.send_response(response, request_id)
+                    debug_out(f"Response sent for request ID: {request_id}", file=sys.stderr)
+
+            except Exception as e:
+                debug_out(f"Error processing command {command}: {e}", file=sys.stderr)
+                traceback.print_exc(file=sys.stderr)
+                # Send an error response if there's a request_id. For streaming
+                # the error frame must also be marked done:true to close the
+                # stream cleanly on the Go side.
+                if request_id is not None:
+                    error_response = {"error": str(e), "traceback": traceback.format_exc()}
+                    if stream:
+                        error_response["done"] = True
+                    self.send_response(error_response, request_id)
+        finally:
+            if cancel_event is not None:
+                self._inflight_events.pop(request_id, None)
+                self._inflight_streaming.pop(request_id, None)
     
     def send_response(self, response: Any, request_id: Optional[str] = None):
         """
