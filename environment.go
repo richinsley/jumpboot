@@ -225,31 +225,15 @@ const (
 	ShowNothing
 )
 
-// CreateEnvironmentMamba creates a new Python environment using micromamba.
-// If micromamba is not present in the rootDir/bin directory, it will be downloaded automatically.
+// createCondaEnvironment ensures micromamba is available under rootDir/bin,
+// then creates (or reuses) a conda environment named envName containing the
+// given conda package specs, and returns a populated BaseEnvironment.
 //
-// Parameters:
-//   - envName: Name for the new environment (e.g., "myenv")
-//   - rootDir: Root directory for micromamba and environments
-//   - pythonVersion: Python version to install (e.g., "3.10"); defaults to "3.10" if empty
-//   - channel: Conda channel to use (e.g., "conda-forge"); uses default if empty
-//   - progressCallback: Optional callback for progress updates; may be nil
-//
-// The environment is created at rootDir/envs/envName. If the environment already exists,
-// it is reused and IsNew will be false.
-//
-// Returns an error if the architecture is unsupported, the directory is not writable,
-// or the requested Python version cannot be satisfied.
-func CreateEnvironmentMamba(envName string, rootDir string, pythonVersion string, channel string, progressCallback ProgressCallback) (*PythonEnvironment, error) {
-	if pythonVersion == "" {
-		pythonVersion = "3.10"
-	}
-
-	requestedVersion, err := ParseVersion(pythonVersion)
-	if err != nil {
-		return nil, fmt.Errorf("error parsing requested python version: %v", err)
-	}
-
+// It is runtime-agnostic: callers layer runtime-specific path and version
+// inspection on top of the returned base. condaPackages are passed verbatim to
+// `micromamba create` (e.g. "python=3.11" or "nodejs=20"); label is a short
+// runtime name used only in progress messages (e.g. "Python", "Node.js").
+func createCondaEnvironment(envName string, rootDir string, condaPackages []string, channel string, label string, progressCallback ProgressCallback) (*BaseEnvironment, error) {
 	binDirectory := filepath.Join(rootDir, "bin")
 	// Check if the specified root directory exists
 	if _, err := os.Stat(binDirectory); os.IsNotExist(err) {
@@ -286,13 +270,11 @@ func CreateEnvironmentMamba(envName string, rootDir string, pythonVersion string
 		executableName += ".exe"
 	}
 
-	// Create the environment object
-	env := &PythonEnvironment{
-		BaseEnvironment: BaseEnvironment{
-			EnvironmentName: envName,
-			RootDir:         rootDir,
-			MicromambaPath:  filepath.Join(binDirectory, executableName),
-		},
+	// Create the base environment object
+	env := &BaseEnvironment{
+		EnvironmentName: envName,
+		RootDir:         rootDir,
+		MicromambaPath:  filepath.Join(binDirectory, executableName),
 	}
 
 	// Check if binDirectory already has micromamba by getting its version
@@ -325,8 +307,9 @@ func CreateEnvironmentMamba(envName string, rootDir string, pythonVersion string
 		// this is a new environment
 		env.IsNew = true
 
-		// Create a new Python environment with micromamba
-		cmdargs := []string{"--root-prefix", env.RootDir, "create", "-n", env.EnvironmentName, "python=" + pythonVersion, "-y"}
+		// Create a new environment with micromamba
+		cmdargs := []string{"--root-prefix", env.RootDir, "create", "-n", env.EnvironmentName, "-y"}
+		cmdargs = append(cmdargs, condaPackages...)
 		if channel != "" {
 			cmdargs = append(cmdargs, "-c", channel)
 		}
@@ -349,7 +332,7 @@ func CreateEnvironmentMamba(envName string, rootDir string, pythonVersion string
 		for scanner.Scan() {
 			lineCount++
 			if progressCallback != nil {
-				progressCallback("Creating Python environment...", int64(lineCount), -1)
+				progressCallback("Creating "+label+" environment...", int64(lineCount), -1)
 			}
 		}
 
@@ -358,37 +341,80 @@ func CreateEnvironmentMamba(envName string, rootDir string, pythonVersion string
 		}
 
 		if progressCallback != nil {
-			progressCallback("Python environment created successfully", 100, 100)
+			progressCallback(label+" environment created successfully", 100, 100)
 		}
 	}
 
-	// Construct the full paths to the Python and pip executables within the created environment
+	// Populate the runtime-agnostic paths.
 	env.EnvPath = envPath
+	env.EnvLibPath = filepath.Join(envPath, "lib")
 	if platform == "windows" {
-		env.EnvBinPath = filepath.Join(env.RootDir, "envs", env.EnvironmentName)
-		env.PythonPath = filepath.Join(env.EnvBinPath, "python.exe")
-		env.PipPath = filepath.Join(env.RootDir, "envs", env.EnvironmentName, "Scripts", "pip.exe")
+		// On Windows the environment root holds the executables directly.
+		env.EnvBinPath = envPath
 	} else {
-		env.EnvBinPath = filepath.Join(env.RootDir, "envs", env.EnvironmentName, "bin")
+		env.EnvBinPath = filepath.Join(envPath, "bin")
+	}
+
+	return env, nil
+}
+
+// CreateEnvironmentMamba creates a new Python environment using micromamba.
+// If micromamba is not present in the rootDir/bin directory, it will be downloaded automatically.
+//
+// Parameters:
+//   - envName: Name for the new environment (e.g., "myenv")
+//   - rootDir: Root directory for micromamba and environments
+//   - pythonVersion: Python version to install (e.g., "3.10"); defaults to "3.10" if empty
+//   - channel: Conda channel to use (e.g., "conda-forge"); uses default if empty
+//   - progressCallback: Optional callback for progress updates; may be nil
+//
+// The environment is created at rootDir/envs/envName. If the environment already exists,
+// it is reused and IsNew will be false.
+//
+// Returns an error if the architecture is unsupported, the directory is not writable,
+// or the requested Python version cannot be satisfied.
+func CreateEnvironmentMamba(envName string, rootDir string, pythonVersion string, channel string, progressCallback ProgressCallback) (*PythonEnvironment, error) {
+	if pythonVersion == "" {
+		pythonVersion = "3.10"
+	}
+
+	requestedVersion, err := ParseVersion(pythonVersion)
+	if err != nil {
+		return nil, fmt.Errorf("error parsing requested python version: %v", err)
+	}
+
+	// Create (or reuse) the conda environment with the runtime-agnostic helper.
+	base, err := createCondaEnvironment(envName, rootDir, []string{"python=" + pythonVersion}, channel, "Python", progressCallback)
+	if err != nil {
+		return nil, err
+	}
+
+	env := &PythonEnvironment{BaseEnvironment: *base}
+	platform := runtime.GOOS
+
+	// Construct the full paths to the Python and pip executables within the created environment
+	if platform == "windows" {
+		env.PythonPath = filepath.Join(env.EnvBinPath, "python.exe")
+		env.PipPath = filepath.Join(env.EnvPath, "Scripts", "pip.exe")
+	} else {
 		env.PythonPath = filepath.Join(env.EnvBinPath, "python")
 		env.PipPath = filepath.Join(env.EnvBinPath, "pip")
 	}
 
-	env.SitePackagesPath = filepath.Join(env.RootDir, "envs", env.EnvironmentName, "lib", "python"+requestedVersion.MinorString(), "site-packages")
+	env.SitePackagesPath = filepath.Join(env.EnvPath, "lib", "python"+requestedVersion.MinorString(), "site-packages")
 
 	// find the python lib path
-	env.EnvLibPath = filepath.Join(env.RootDir, "envs", env.EnvironmentName, "lib")
 	env.PythonLibPath = env.EnvLibPath
 	if platform == "windows" {
-		env.PythonLibPath = filepath.Join(env.RootDir, "envs", env.EnvironmentName, "python"+requestedVersion.MinorStringCompact()+".dll")
+		env.PythonLibPath = filepath.Join(env.EnvPath, "python"+requestedVersion.MinorStringCompact()+".dll")
 	} else if platform == "darwin" {
-		env.PythonLibPath = filepath.Join(env.RootDir, "envs", env.EnvironmentName, "lib", "libpython"+requestedVersion.MinorString()+".dylib")
+		env.PythonLibPath = filepath.Join(env.EnvPath, "lib", "libpython"+requestedVersion.MinorString()+".dylib")
 	} else {
-		env.PythonLibPath = filepath.Join(env.RootDir, "envs", env.EnvironmentName, "lib", "libpython"+requestedVersion.MinorString()+".so")
+		env.PythonLibPath = filepath.Join(env.EnvPath, "lib", "libpython"+requestedVersion.MinorString()+".so")
 	}
 
 	// find the python headers path
-	env.PythonHeadersPath = filepath.Join(env.RootDir, "envs", env.EnvironmentName, "include", "python"+requestedVersion.MinorString())
+	env.PythonHeadersPath = filepath.Join(env.EnvPath, "include", "python"+requestedVersion.MinorString())
 
 	// Check if the Python executable exists and get its version
 	pver, err := RunReadStdout(env.PythonPath, "--version")

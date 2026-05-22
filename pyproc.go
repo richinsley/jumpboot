@@ -249,7 +249,11 @@ func fsDirHasInitPy(fs embed.FS, path string) bool {
 	return false
 }
 
-func newPackageFromFS(name string, sourcepath string, rootpath string, fs embed.FS) (*Package, error) {
+// newPackageFromFS recursively loads source files with the given extension
+// (e.g. ".py" or ".js") from an embed.FS into a Package. The ext parameter
+// keeps the loader runtime-neutral so it can build both Python and Node.js
+// embedded packages.
+func newPackageFromFS(name string, sourcepath string, rootpath string, fs embed.FS, ext string) (*Package, error) {
 	retv := &Package{
 		Name: name,
 		Path: rootpath,
@@ -263,7 +267,7 @@ func newPackageFromFS(name string, sourcepath string, rootpath string, fs embed.
 	for _, entry := range entries {
 		fpath := path.Join(rootpath, entry.Name())
 		if entry.IsDir() {
-			subpackage, err := newPackageFromFS(entry.Name(), sourcepath, fpath, fs)
+			subpackage, err := newPackageFromFS(entry.Name(), sourcepath, fpath, fs, ext)
 			if err != nil {
 				continue
 			}
@@ -281,7 +285,7 @@ func newPackageFromFS(name string, sourcepath string, rootpath string, fs embed.
 				return nil, err
 			}
 
-			if path.Ext(entry.Name()) != ".py" {
+			if path.Ext(entry.Name()) != ext {
 				continue
 			} else {
 				module := NewModuleFromString(entry.Name(), fpath, string(source))
@@ -311,7 +315,7 @@ func newPackageFromFS(name string, sourcepath string, rootpath string, fs embed.
 func NewPackageFromFS(name string, sourcepath string, rootpath string, fs embed.FS) (*Package, error) {
 	// the embedded filesystem should be a directory
 
-	return newPackageFromFS(name, sourcepath, rootpath, fs)
+	return newPackageFromFS(name, sourcepath, rootpath, fs, ".py")
 }
 
 func procTemplate(templateStr string, data interface{}) string {
@@ -351,7 +355,7 @@ func procTemplate(templateStr string, data interface{}) string {
 // Returns the PythonProcess, the JSON-encoded program data, and any error.
 func (env *PythonEnvironment) NewPythonProcessFromProgram(program *PythonProgram, environment_vars map[string]string, extrafiles []*os.File, debug bool, args ...string) (*PythonProcess, []byte, error) {
 	// create the jumpboot package
-	jumpboot_package, err := newPackageFromFS("jumpboot", "jumpboot", "packages/jumpboot", jumpboot_package)
+	jumpboot_package, err := newPackageFromFS("jumpboot", "jumpboot", "packages/jumpboot", jumpboot_package, ".py")
 	if err != nil {
 		return nil, nil, err
 	}
@@ -728,6 +732,28 @@ func (pp *PythonProcess) MonitorProcess() {
 		}()
 	})
 }
+
+// --- RuntimeProcess interface ---
+//
+// These accessor methods let *PythonProcess satisfy the language-neutral
+// RuntimeProcess interface (see runtime_process.go) without renaming any of
+// PythonProcess's exported fields, which are part of the public API.
+
+// Transport returns a MessagePack transport over the process's data pipes.
+// It constructs a fresh transport on each call; QueueProcess calls it once.
+func (pp *PythonProcess) Transport() Transport {
+	return NewMsgpackTransport(pp.PipeIn, pp.PipeOut)
+}
+
+// StdoutReader returns the process's standard output stream.
+func (pp *PythonProcess) StdoutReader() io.ReadCloser { return pp.Stdout }
+
+// StderrReader returns the process's standard error stream.
+func (pp *PythonProcess) StderrReader() io.ReadCloser { return pp.Stderr }
+
+// SetExitHandler registers the callback invoked when the process exits.
+// It must be set before MonitorProcess to take effect.
+func (pp *PythonProcess) SetExitHandler(h ProcessExitHandler) { pp.OnExit = h }
 
 func setupSignalHandler(pp *PythonProcess) {
 	signalChan := make(chan os.Signal, 1)

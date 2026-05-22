@@ -34,7 +34,17 @@ import (
 //	result, _ := queue.Call("process_data", 30, map[string]interface{}{"input": data})
 //	queue.Close()
 type QueueProcess struct {
-	*PythonProcess
+	// RuntimeProcess is the language-neutral process this queue drives
+	// (a Python subprocess today, a Node.js subprocess or WASM module next).
+	// Its lifecycle methods (Alive, ExitChan, Terminate, Wait, ...) are
+	// promoted onto QueueProcess.
+	RuntimeProcess
+
+	// PythonProcess is the concrete process when this queue drives a Python
+	// runtime, and nil for any other runtime. Retained for backward
+	// compatibility with callers that reach for the *PythonProcess directly;
+	// new code should prefer the promoted RuntimeProcess methods.
+	PythonProcess *PythonProcess
 
 	// serializer handles message encoding/decoding (MessagePack)
 	serializer Serializer
@@ -144,31 +154,45 @@ func (env *PythonEnvironment) NewQueueProcess(program *PythonProgram, serviceStr
 		return nil, err
 	}
 
-	// Goroutine to read Python's stdout
-	go func() {
-		io.Copy(os.Stdout, pyProcess.Stdout)
-	}()
+	jq, err := newQueueProcess(pyProcess, serviceStruct)
+	if err != nil {
+		return nil, err
+	}
+	// Retain the concrete process for backward-compatible callers.
+	jq.PythonProcess = pyProcess
+	return jq, nil
+}
 
-	// Goroutine to read Python's stderr
+// newQueueProcess builds a QueueProcess around any RuntimeProcess. It forwards
+// the runtime's stdout/stderr to Go's standard streams, wires crash detection
+// so pending calls unblock on exit, registers serviceStruct's exported methods
+// as command handlers via reflection, starts the message loop, and discovers
+// the peer's methods. This is the language-neutral core shared by every
+// runtime's NewQueueProcess entry point (Python today, Node.js next).
+func newQueueProcess(rp RuntimeProcess, serviceStruct interface{}) (*QueueProcess, error) {
+	// Forward the runtime's stdout/stderr to Go's standard streams.
 	go func() {
-		io.Copy(os.Stderr, pyProcess.Stderr)
+		io.Copy(os.Stdout, rp.StdoutReader())
+	}()
+	go func() {
+		io.Copy(os.Stderr, rp.StderrReader())
 	}()
 
 	jq := &QueueProcess{
-		PythonProcess: pyProcess,
-		serializer:    MsgpackSerializer{},
-		transport:     NewMsgpackTransport(pyProcess.PipeIn, pyProcess.PipeOut),
-		responseMap:   make(map[string]chan map[string]interface{}),
-		nextID:        1,
-		methodCache:   make(map[string]MethodInfo),
+		RuntimeProcess:  rp,
+		serializer:      MsgpackSerializer{},
+		transport:       rp.Transport(),
+		responseMap:     make(map[string]chan map[string]interface{}),
+		nextID:          1,
+		methodCache:     make(map[string]MethodInfo),
 		commandHandlers: map[string]CommandHandler{},
 	}
 
-	// Start process monitoring — detects crashes and unblocks pending calls
-	pyProcess.OnExit = func(exitErr error) {
+	// Start process monitoring — detects crashes and unblocks pending calls.
+	rp.SetExitHandler(func(exitErr error) {
 		jq.handleProcessExit(exitErr)
-	}
-	pyProcess.MonitorProcess()
+	})
+	rp.MonitorProcess()
 
 	if serviceStruct != nil {
 		// --- Reflect over the serviceStruct ---
@@ -245,11 +269,10 @@ func (env *PythonEnvironment) NewQueueProcess(program *PythonProgram, serviceStr
 	// RPC callers waiting for responses that were consumed by the wrong reader.
 	jq.Start()
 
-	// Fetch method info from Python
-	err = jq.discoverMethods()
-	if err != nil {
+	// Fetch method info from the runtime.
+	if err := jq.discoverMethods(); err != nil {
 		// Not fatal, just log it
-		fmt.Printf("Warning: Failed to discover Python methods: %v\n", err)
+		fmt.Printf("Warning: Failed to discover runtime methods: %v\n", err)
 	}
 
 	return jq, nil
@@ -323,7 +346,7 @@ func (jq *QueueProcess) Call(methodName string, timeoutSeconds int, args interfa
 
 	// Check for errors
 	if errMsg, ok := response["error"].(string); ok {
-		return nil, fmt.Errorf("python error: %s", errMsg)
+		return nil, fmt.Errorf("runtime error: %s", errMsg)
 	}
 
 	// Return the result (might be in "result" or directly in the response)
@@ -355,8 +378,8 @@ func (jq *QueueProcess) Call(methodName string, timeoutSeconds int, args interfa
 //
 // Part of the streaming+cancellation design (DESIGN-STREAMING-CANCEL.md in jb-mesh).
 func (jq *QueueProcess) CallContext(ctx context.Context, methodName string, args interface{}) (interface{}, error) {
-	if !jq.PythonProcess.Alive() {
-		return nil, fmt.Errorf("%w: %v", ErrProcessExited, jq.PythonProcess.ExitError())
+	if !jq.Alive() {
+		return nil, fmt.Errorf("%w: %v", ErrProcessExited, jq.ExitError())
 	}
 
 	// Fast path: ctx already done.
@@ -383,7 +406,7 @@ func (jq *QueueProcess) CallContext(ctx context.Context, methodName string, args
 		return nil, err
 	}
 
-	exitChan := jq.PythonProcess.ExitChan()
+	exitChan := jq.ExitChan()
 
 	// Wait for either the response, process exit, or context cancellation.
 	select {
@@ -395,7 +418,7 @@ func (jq *QueueProcess) CallContext(ctx context.Context, methodName string, args
 		case response := <-responseChan:
 			return extractCallResult(response)
 		default:
-			return nil, fmt.Errorf("%w: %v", ErrProcessExited, jq.PythonProcess.ExitError())
+			return nil, fmt.Errorf("%w: %v", ErrProcessExited, jq.ExitError())
 		}
 	case <-ctx.Done():
 		// Caller cancelled. Send __cancel__ to Python so the method can stop early.
@@ -423,7 +446,7 @@ func (jq *QueueProcess) CallContext(ctx context.Context, methodName string, args
 			jq.mutex.Lock()
 			delete(jq.responseMap, requestID)
 			jq.mutex.Unlock()
-			return nil, fmt.Errorf("%w: %v", ErrProcessExited, jq.PythonProcess.ExitError())
+			return nil, fmt.Errorf("%w: %v", ErrProcessExited, jq.ExitError())
 		}
 	}
 }
@@ -446,8 +469,8 @@ func (jq *QueueProcess) CallContext(ctx context.Context, methodName string, args
 //
 // Phase 2 of DESIGN-STREAMING-CANCEL.md.
 func (jq *QueueProcess) CallStream(ctx context.Context, methodName string, args interface{}) (<-chan map[string]interface{}, error) {
-	if !jq.PythonProcess.Alive() {
-		return nil, fmt.Errorf("%w: %v", ErrProcessExited, jq.PythonProcess.ExitError())
+	if !jq.Alive() {
+		return nil, fmt.Errorf("%w: %v", ErrProcessExited, jq.ExitError())
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -476,7 +499,7 @@ func (jq *QueueProcess) CallStream(ctx context.Context, methodName string, args 
 	}
 
 	out := make(chan map[string]interface{}, 1)
-	exitChan := jq.PythonProcess.ExitChan()
+	exitChan := jq.ExitChan()
 
 	go func() {
 		defer close(out)
@@ -529,8 +552,8 @@ func (jq *QueueProcess) CallStream(ctx context.Context, methodName string, args 
 // callers (jb-mesh per-call cancel subscriptions) that need to cancel a known
 // in-flight request from outside the call.
 func (jq *QueueProcess) SendCancel(targetRequestID string) error {
-	if !jq.PythonProcess.Alive() {
-		return fmt.Errorf("%w: %v", ErrProcessExited, jq.PythonProcess.ExitError())
+	if !jq.Alive() {
+		return fmt.Errorf("%w: %v", ErrProcessExited, jq.ExitError())
 	}
 	cancelRequestID := jq.generateRequestID()
 	request := map[string]interface{}{
@@ -545,7 +568,7 @@ func (jq *QueueProcess) SendCancel(targetRequestID string) error {
 // return shape. Pulled out of Call so CallContext can share the logic.
 func extractCallResult(response map[string]interface{}) (interface{}, error) {
 	if errMsg, ok := response["error"].(string); ok {
-		return nil, fmt.Errorf("python error: %s", errMsg)
+		return nil, fmt.Errorf("runtime error: %s", errMsg)
 	}
 	if result, ok := response["result"]; ok {
 		return result, nil
@@ -793,8 +816,8 @@ func (jq *QueueProcess) sendMessage(message map[string]interface{}) error {
 // Returns the response map (if waiting) or nil, and any error encountered.
 func (jq *QueueProcess) SendCommand(command string, data interface{}, timeoutSeconds int, waitForResponse bool) (map[string]interface{}, error) {
 	// Fail fast if process is dead
-	if !jq.PythonProcess.Alive() {
-		return nil, fmt.Errorf("%w: %v", ErrProcessExited, jq.PythonProcess.ExitError())
+	if !jq.Alive() {
+		return nil, fmt.Errorf("%w: %v", ErrProcessExited, jq.ExitError())
 	}
 
 	requestID := jq.generateRequestID()
@@ -828,7 +851,7 @@ func (jq *QueueProcess) SendCommand(command string, data interface{}, timeoutSec
 	}
 
 	// Wait for response, with process exit as an escape hatch
-	exitChan := jq.PythonProcess.ExitChan()
+	exitChan := jq.ExitChan()
 
 	if timeoutSeconds <= 0 {
 		select {
@@ -840,7 +863,7 @@ func (jq *QueueProcess) SendCommand(command string, data interface{}, timeoutSec
 			case response := <-responseChan:
 				return response, nil
 			default:
-				return nil, fmt.Errorf("%w: %v", ErrProcessExited, jq.PythonProcess.ExitError())
+				return nil, fmt.Errorf("%w: %v", ErrProcessExited, jq.ExitError())
 			}
 		}
 	} else {
@@ -852,7 +875,7 @@ func (jq *QueueProcess) SendCommand(command string, data interface{}, timeoutSec
 			case response := <-responseChan:
 				return response, nil
 			default:
-				return nil, fmt.Errorf("%w: %v", ErrProcessExited, jq.PythonProcess.ExitError())
+				return nil, fmt.Errorf("%w: %v", ErrProcessExited, jq.ExitError())
 			}
 		case <-time.After(time.Duration(timeoutSeconds) * time.Second):
 			jq.mutex.Lock()
@@ -873,7 +896,7 @@ func (jq *QueueProcess) handleProcessExit(exitErr error) {
 	// Drain all pending response channels so blocked callers unblock
 	for id, ch := range jq.responseMap {
 		ch <- map[string]interface{}{
-			"error":      fmt.Sprintf("python process exited: %v", exitErr),
+			"error":      fmt.Sprintf("runtime process exited: %v", exitErr),
 			"request_id": id,
 		}
 		delete(jq.responseMap, id)
@@ -895,14 +918,14 @@ func (jq *QueueProcess) Close() error {
 	jq.mutex.Unlock()
 
 	// Send exit command without waiting for a response
-	fmt.Println("Sending exit command to Python process...")
+	fmt.Println("Sending exit command to runtime process...")
 	jq.SendCommand("exit", nil, 0, false)
 
 	// Small delay to allow the command to be sent
 	time.Sleep(50 * time.Millisecond)
 
 	// Terminate the process
-	return jq.PythonProcess.Terminate()
+	return jq.Terminate()
 }
 
 // Shutdown gracefully stops the QueueProcess by sending a "shutdown" command
@@ -918,7 +941,7 @@ func (jq *QueueProcess) Shutdown() error {
 	fmt.Printf("Shutdown response: %v\n", resp)
 
 	// Wait for Python process to exit
-	return jq.PythonProcess.Wait()
+	return jq.Wait()
 }
 
 // On begins a fluent method call chain for the specified Python method.
@@ -1040,7 +1063,7 @@ func extractResult(response map[string]interface{}, err error) (interface{}, err
 	}
 
 	if errMsg, ok := response["error"].(string); ok {
-		return nil, fmt.Errorf("python error: %s", errMsg)
+		return nil, fmt.Errorf("runtime error: %s", errMsg)
 	}
 
 	return response["result"], nil
