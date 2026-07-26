@@ -643,6 +643,13 @@ func (pp *PythonProcess) Terminate() error {
 
 	// Already exited
 	if !pp.Alive() {
+		// The process may have exited while descendants remain in its process
+		// group. Give the platform cleanup path a chance to reap them.
+		done := make(chan struct{})
+		close(done)
+		if err := terminateProcess(pp.Cmd, done); err != nil {
+			return err
+		}
 		return pp.ExitError()
 	}
 
