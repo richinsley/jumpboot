@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"syscall"
+	"time"
 )
 
 func setSignalsForChannel(c chan os.Signal) {
@@ -31,6 +32,34 @@ func waitForExit(cmd *exec.Cmd) error {
 	return nil
 }
 
+func prepareProcessCommand(cmd *exec.Cmd) {
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.HideWindow = true
+}
+
+func terminateProcess(cmd *exec.Cmd, done <-chan struct{}) error {
+	if cmd.Process == nil {
+		return nil
+	}
+
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		return err
+	}
+
+	select {
+	case <-time.After(5 * time.Second):
+		if err := cmd.Process.Kill(); err != nil {
+			return err
+		}
+		<-done
+	case <-done:
+	}
+
+	return nil
+}
+
 // return the file descriptors as numerical strings
 func setExtraFiles(cmd *exec.Cmd, extraFiles []*os.File) []string {
 	retv := make([]string, len(extraFiles))
@@ -41,13 +70,11 @@ func setExtraFiles(cmd *exec.Cmd, extraFiles []*os.File) []string {
 	}
 
 	// Pass the handle to the child process
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		// Hide the console window
-		HideWindow: true,
-		// Inherit handles
-		NoInheritHandles: false,
-		// Pass the handle to the child process
-		AdditionalInheritedHandles: handles,
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
 	}
+	cmd.SysProcAttr.HideWindow = true
+	cmd.SysProcAttr.NoInheritHandles = false
+	cmd.SysProcAttr.AdditionalInheritedHandles = handles
 	return retv
 }

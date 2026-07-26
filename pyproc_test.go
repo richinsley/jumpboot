@@ -3,6 +3,11 @@ package jumpboot
 import (
 	"encoding/base64"
 	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"runtime"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -205,9 +210,76 @@ func TestTerminate_RunningProcess(t *testing.T) {
 	}
 }
 
+func TestTerminate_KillsChildProcessGroup(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("process group termination is Unix-specific")
+	}
+
+	env := getTestEnv(t)
+	pidFile := t.TempDir() + "/child.pid"
+	script := `
+import pathlib
+import subprocess
+import time
+
+pid_file = pathlib.Path(%q)
+child = subprocess.Popen(["sleep", "60"])
+pid_file.write_text(str(child.pid))
+while True:
+    time.sleep(1)
+`
+	proc := startTestProgram(t, env, fmt.Sprintf(script, pidFile))
+	proc.MonitorProcess()
+	defer proc.Terminate()
+
+	childPID := waitForChildPID(t, pidFile)
+	if !pidAlive(childPID) {
+		t.Fatalf("child process %d was not alive before Terminate", childPID)
+	}
+
+	if err := proc.Terminate(); err != nil {
+		t.Fatalf("Terminate failed: %v", err)
+	}
+
+	waitForProcessExit(t, childPID)
+}
+
 func TestErrProcessExited_Sentinel(t *testing.T) {
 	wrapped := errors.Join(ErrProcessExited, errors.New("exit status 1"))
 	if !errors.Is(wrapped, ErrProcessExited) {
 		t.Error("errors.Is should match ErrProcessExited in wrapped error")
 	}
+}
+
+func waitForChildPID(t *testing.T, path string) int {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		b, err := os.ReadFile(path)
+		if err == nil {
+			pid, convErr := strconv.Atoi(string(b))
+			if convErr == nil && pid > 0 {
+				return pid
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for child pid file %s", path)
+	return 0
+}
+
+func waitForProcessExit(t *testing.T, pid int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if !pidAlive(pid) {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("process %d still alive after termination", pid)
+}
+
+func pidAlive(pid int) bool {
+	return exec.Command("kill", "-0", strconv.Itoa(pid)).Run() == nil
 }

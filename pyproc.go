@@ -15,9 +15,7 @@ import (
 	"path"
 	"strconv"
 	"sync"
-	"syscall"
 	"text/template"
-	"time"
 )
 
 // ErrProcessExited is returned when an operation is attempted on a process that has exited.
@@ -422,6 +420,7 @@ func (env *PythonEnvironment) NewPythonProcessFromProgram(program *PythonProgram
 	for key, value := range environment_vars {
 		cmd.Env = append(cmd.Env, key+"="+value)
 	}
+	prepareProcessCommand(cmd)
 
 	// Create pipes for the input, output, and error of the script
 	stdinPipe, err := cmd.StdinPipe()
@@ -566,6 +565,7 @@ func (env *PythonEnvironment) NewPythonProcessFromString(script string, environm
 	for key, value := range environment_vars {
 		cmd.Env = append(cmd.Env, key+"="+value)
 	}
+	prepareProcessCommand(cmd)
 
 	// Create pipes for the input, output, and error of the script
 	stdinPipe, err := cmd.StdinPipe()
@@ -646,12 +646,6 @@ func (pp *PythonProcess) Terminate() error {
 		return pp.ExitError()
 	}
 
-	// Try to terminate gracefully first
-	err := pp.Cmd.Process.Signal(syscall.SIGTERM)
-	if err != nil {
-		return err
-	}
-
 	// Use exitChan if monitor is active, otherwise spawn a waiter
 	var done <-chan struct{}
 	if pp.exitChan != nil {
@@ -665,20 +659,11 @@ func (pp *PythonProcess) Terminate() error {
 		done = d
 	}
 
-	// Wait for the process to exit or force kill after timeout
-	select {
-	case <-time.After(5 * time.Second):
-		// Force kill if it doesn't exit within 5 seconds
-		err = pp.Cmd.Process.Kill()
-		if err != nil {
-			return err
-		}
-		<-done
-	case <-done:
-		// Process exited before timeout
+	if err := terminateProcess(pp.Cmd, done); err != nil {
+		return err
 	}
 
-	return pp.ExitError()
+	return nil
 }
 
 // Alive returns true if the Python process is still running.

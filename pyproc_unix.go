@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"syscall"
+	"time"
 )
 
 // setSignalsForChannel configures the channel to receive SIGINT and SIGTERM.
@@ -30,6 +31,43 @@ func waitForExit(cmd *exec.Cmd) error {
 		}
 		return err
 	}
+	return nil
+}
+
+func prepareProcessCommand(cmd *exec.Cmd) {
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.Setpgid = true
+}
+
+func terminateProcess(cmd *exec.Cmd, done <-chan struct{}) error {
+	if cmd.Process == nil {
+		return nil
+	}
+
+	pid := cmd.Process.Pid
+	target := -pid
+	if pgid, err := syscall.Getpgid(pid); err == nil {
+		target = -pgid
+	}
+
+	if err := syscall.Kill(target, syscall.SIGTERM); err != nil {
+		if errors.Is(err, syscall.ESRCH) {
+			return nil
+		}
+		return err
+	}
+
+	select {
+	case <-time.After(5 * time.Second):
+		if err := syscall.Kill(target, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+			return err
+		}
+		<-done
+	case <-done:
+	}
+
 	return nil
 }
 
