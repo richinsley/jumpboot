@@ -789,6 +789,17 @@ func CreateVenvEnvironment(baseEnv *PythonEnvironment, venvPath string, options 
 //
 // File URLs in pip freeze output are cleaned to show only package names.
 func (env *PythonEnvironment) FreezeToFile(filePath string) error {
+	return env.freezeToFile(filePath, nil)
+}
+
+// FreezeToFileWithEnv saves an environment specification using exactly the
+// process environment supplied by the caller for pip/micromamba inspection
+// commands. A nil processEnv preserves the same behavior as FreezeToFile.
+func (env *PythonEnvironment) FreezeToFileWithEnv(filePath string, processEnv []string) error {
+	return env.freezeToFile(filePath, append([]string(nil), processEnv...))
+}
+
+func (env *PythonEnvironment) freezeToFile(filePath string, processEnv []string) error {
 	spec := EnvironmentSpec{
 		Name:          env.EnvironmentName,
 		CondaPackages: []string{},
@@ -808,6 +819,9 @@ func (env *PythonEnvironment) FreezeToFile(filePath string) error {
 	// --- 1. Get pip packages (if pip is available) FIRST ---
 	if env.PipPath != "" {
 		pipCmd := exec.Command(env.PipPath, "freeze")
+		if processEnv != nil {
+			pipCmd.Env = processEnv
+		}
 		pipOutput, pipErr := pipCmd.Output()
 		if pipErr != nil {
 			return fmt.Errorf("error running pip freeze: %v", pipErr)
@@ -845,7 +859,11 @@ func (env *PythonEnvironment) FreezeToFile(filePath string) error {
 	// 2. Get conda packages (if micromamba is available).
 	if env.MicromambaPath != "" {
 		cmd := exec.Command(env.MicromambaPath, "list", "-n", env.EnvironmentName, "--json")
-		cmd.Env = append(os.Environ(), "MAMBA_ROOT_PREFIX="+env.RootDir)
+		if processEnv != nil {
+			cmd.Env = append(append([]string(nil), processEnv...), "MAMBA_ROOT_PREFIX="+env.RootDir)
+		} else {
+			cmd.Env = append(os.Environ(), "MAMBA_ROOT_PREFIX="+env.RootDir)
+		}
 		output, err := cmd.Output()
 		if err != nil {
 			return fmt.Errorf("error running micromamba list: %v - %s", err, string(output))

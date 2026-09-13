@@ -348,6 +348,20 @@ func procTemplate(templateStr string, data interface{}) string {
 //
 // Returns the PythonProcess, the JSON-encoded program data, and any error.
 func (env *PythonEnvironment) NewPythonProcessFromProgram(program *PythonProgram, environment_vars map[string]string, extrafiles []*os.File, debug bool, args ...string) (*PythonProcess, []byte, error) {
+	processEnv := os.Environ()
+	for key, value := range environment_vars {
+		processEnv = append(processEnv, key+"="+value)
+	}
+	return env.newPythonProcessFromProgram(program, processEnv, extrafiles, debug, args...)
+}
+
+// NewPythonProcessFromProgramWithEnv starts a Python process with exactly the
+// process environment provided by the caller. It does not inherit os.Environ().
+func (env *PythonEnvironment) NewPythonProcessFromProgramWithEnv(program *PythonProgram, processEnv []string, extrafiles []*os.File, debug bool, args ...string) (*PythonProcess, []byte, error) {
+	return env.newPythonProcessFromProgram(program, append([]string(nil), processEnv...), extrafiles, debug, args...)
+}
+
+func (env *PythonEnvironment) newPythonProcessFromProgram(program *PythonProgram, processEnv []string, extrafiles []*os.File, debug bool, args ...string) (*PythonProcess, []byte, error) {
 	// create the jumpboot package
 	jumpboot_package, err := newPackageFromFS("jumpboot", "jumpboot", "packages/jumpboot", jumpboot_package)
 	if err != nil {
@@ -416,10 +430,7 @@ func (env *PythonEnvironment) NewPythonProcessFromProgram(program *PythonProgram
 	cmd.Args = append(cmd.Args, args...)
 
 	// Set environment variables
-	cmd.Env = os.Environ()
-	for key, value := range environment_vars {
-		cmd.Env = append(cmd.Env, key+"="+value)
-	}
+	cmd.Env = processEnv
 	prepareProcessCommand(cmd)
 
 	// Create pipes for the input, output, and error of the script

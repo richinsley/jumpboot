@@ -56,6 +56,20 @@ type REPLPythonProcess struct {
 // The REPL process starts with combined output mode (stdout and stderr merged).
 // Use Execute with combinedOutput=false to capture them separately.
 func (env *PythonEnvironment) NewREPLPythonProcess(kvpairs map[string]interface{}, environment_vars map[string]string, modules []Module, packages []Package) (*REPLPythonProcess, error) {
+	processEnv := os.Environ()
+	for key, value := range environment_vars {
+		processEnv = append(processEnv, key+"="+value)
+	}
+	return env.newREPLPythonProcess(kvpairs, processEnv, modules, packages)
+}
+
+// NewREPLPythonProcessWithEnv creates a REPL process with exactly the process
+// environment supplied by the caller. It does not inherit os.Environ().
+func (env *PythonEnvironment) NewREPLPythonProcessWithEnv(kvpairs map[string]interface{}, processEnv []string, modules []Module, packages []Package) (*REPLPythonProcess, error) {
+	return env.newREPLPythonProcess(kvpairs, append([]string(nil), processEnv...), modules, packages)
+}
+
+func (env *PythonEnvironment) newREPLPythonProcess(kvpairs map[string]interface{}, processEnv []string, modules []Module, packages []Package) (*REPLPythonProcess, error) {
 	cwd, _ := os.Getwd()
 	if modules == nil {
 		modules = []Module{}
@@ -77,7 +91,7 @@ func (env *PythonEnvironment) NewREPLPythonProcess(kvpairs map[string]interface{
 		// KVPairs:  map[string]interface{}{"SHARED_MEMORY_NAME": name, "SHARED_MEMORY_SIZE": size, "SEMAPHORE_NAME": semaphore_name},
 	}
 
-	process, _, err := env.NewPythonProcessFromProgram(program, environment_vars, nil, false)
+	process, _, err := env.NewPythonProcessFromProgramWithEnv(program, processEnv, nil, false)
 	if err != nil {
 		return nil, err
 	}

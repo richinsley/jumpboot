@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"sync"
@@ -43,6 +44,45 @@ func startTestProgram(t *testing.T, env *PythonEnvironment, script string) *Pyth
 		t.Fatalf("Failed to start Python process: %v", err)
 	}
 	return proc
+}
+
+func TestNewPythonProcessFromProgramWithEnvUsesExactEnvironment(t *testing.T) {
+	env := getTestEnv(t)
+	t.Setenv("JUMPBOOT_EXACT_ENV_SECRET", "must-not-reach-child")
+	dir := t.TempDir()
+	out := filepath.Join(dir, "seen.txt")
+	program := &PythonProgram{
+		Name: "test",
+		Path: ".",
+		Program: Module{
+			Name: "__main__",
+			Path: "test.py",
+			Source: base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf(`
+import os
+with open(%q, "w") as f:
+    f.write(repr((os.environ.get("JUMPBOOT_EXACT_ENV_SECRET"), os.environ.get("HOME"))))
+`, out))),
+		},
+	}
+	proc, _, err := env.NewPythonProcessFromProgramWithEnv(program, []string{"HOME=" + dir, "PATH=" + os.Getenv("PATH")}, nil, false)
+	if err != nil {
+		t.Fatalf("Failed to start Python process: %v", err)
+	}
+	proc.MonitorProcess()
+	select {
+	case <-proc.ExitChan():
+	case <-time.After(5 * time.Second):
+		proc.Terminate()
+		t.Fatal("Process did not exit within 5s")
+	}
+	data, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := fmt.Sprintf("(None, '%s')", dir)
+	if string(data) != want {
+		t.Fatalf("child environment = %s, want %s", data, want)
+	}
 }
 
 // longRunningScript is a Python script that stays alive until killed.

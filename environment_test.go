@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -56,6 +57,52 @@ func isValidEnvironment(t *testing.T, env *PythonEnvironment) {
 	}
 	if env.PythonHeadersPath == "" {
 		t.Error("PythonHeadersPath is empty")
+	}
+}
+
+func TestFreezeToFileWithEnvUsesExactProcessEnvironment(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script fake pip is POSIX-only")
+	}
+	t.Setenv("JUMPBOOT_FREEZE_ENV_SECRET", "must-not-reach-pip")
+	dir := t.TempDir()
+	seen := filepath.Join(dir, "seen.txt")
+	pip := filepath.Join(dir, "pip")
+	script := "#!/bin/sh\n" +
+		"printf '%s|%s\\n' \"$JUMPBOOT_FREEZE_ENV_SECRET\" \"$HOME\" > " + strconv.Quote(seen) + "\n" +
+		"printf 'demo==1.0\\n'\n"
+	if err := os.WriteFile(pip, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	env := &PythonEnvironment{
+		BaseEnvironment: BaseEnvironment{
+			EnvironmentName:   "fake",
+			MicromambaVersion: Version{Major: -1, Minor: -1, Patch: -1},
+		},
+		PipPath:       pip,
+		PythonVersion: Version{Major: 3, Minor: 12, Patch: 0},
+	}
+	out := filepath.Join(dir, "environment.json")
+	if err := env.FreezeToFileWithEnv(out, []string{"HOME=" + dir, "PATH=" + os.Getenv("PATH")}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(seen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.TrimSpace(string(data)), "|"+dir; got != want {
+		t.Fatalf("pip freeze environment = %q, want %q", got, want)
+	}
+	var spec EnvironmentSpec
+	raw, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(raw, &spec); err != nil {
+		t.Fatal(err)
+	}
+	if len(spec.PipPackages) != 1 || spec.PipPackages[0] != "demo==1.0" {
+		t.Fatalf("pip packages = %+v", spec.PipPackages)
 	}
 }
 
