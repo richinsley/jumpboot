@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 )
 
 // RunPythonReadCombined executes a Python script and returns combined stdout/stderr.
@@ -22,26 +23,7 @@ func (env *PythonEnvironment) RunPythonReadCombined(scriptPath string, args ...s
 // RunPythonReadStdout executes a Python script and returns only stdout.
 // This is a blocking call that waits for the script to complete.
 func (env *PythonEnvironment) RunPythonReadStdout(scriptPath string, args ...string) (string, error) {
-	// put scriptPath at the front of the args
-	retv := ""
-	args = append([]string{scriptPath}, args...)
-	cmd := exec.Command(env.PythonPath, args...)
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return "", err
-	}
-	defer stdout.Close()
-
-	// continue to read the output until there is no more
-	// or an error occurs
-	if err := cmd.Start(); err != nil {
-		return "", err
-	}
-	scanner := bufio.NewScanner(stdout)
-	for scanner.Scan() {
-		retv += scanner.Text() + "\n"
-	}
-	return retv, nil
+	return RunReadStdout(env.PythonPath, append([]string{scriptPath}, args...)...)
 }
 
 // RunPythonScriptFromFile executes a Python script file, printing stderr to stdout.
@@ -99,12 +81,29 @@ func (env *PythonEnvironment) BoundRunPythonScriptFromFile(scriptPath string, ar
 	// Create a channel to receive signals
 	signalChan := make(chan os.Signal, 1)
 	setSignalsForChannel(signalChan)
+	stopListener := make(chan struct{})
+	listenerDone := make(chan struct{})
+	defer func() {
+		signal.Stop(signalChan)
+		close(stopListener)
+		<-listenerDone
+	}()
 
 	// Wait for the command to finish or a signal to be received
 	go func() {
-		<-signalChan
-		// Kill the child process when a signal is received
-		cmd.Process.Kill()
+		defer close(listenerDone)
+		select {
+		case <-stopListener:
+			return
+		case <-signalChan:
+			select {
+			case <-stopListener:
+				return
+			default:
+			}
+			// Kill the child process when a signal is received.
+			cmd.Process.Kill()
+		}
 	}()
 
 	// Read from the command's stdout

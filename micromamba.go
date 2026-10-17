@@ -89,10 +89,14 @@ func ExpectMicromamba(binFolder string, progressCallback ProgressCallback) (stri
 		return "", fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
 
-	f, err := os.OpenFile(binpath, os.O_CREATE|os.O_WRONLY, 0755)
+	// Keep the installed binary untouched until the whole response has been
+	// written. A failed download must never leave a partial executable behind.
+	f, err := os.CreateTemp(binFolder, "."+executableName+"-download-*")
 	if err != nil {
-		return "", fmt.Errorf("error creating file: %v", err)
+		return "", fmt.Errorf("error creating temporary file: %w", err)
 	}
+	tmpPath := f.Name()
+	defer os.Remove(tmpPath)
 	defer f.Close()
 
 	var written int64
@@ -129,14 +133,23 @@ func ExpectMicromamba(binFolder string, progressCallback ProgressCallback) (stri
 	}
 
 	if err != nil {
-		return "", fmt.Errorf("error downloading micromamba: %v", err)
+		return "", fmt.Errorf("error downloading micromamba: %w", err)
 	}
 
 	// Change file permissions to make it executable (not applicable for Windows)
 	if platform != "win" {
-		if err := os.Chmod(binpath, 0755); err != nil {
-			return "", fmt.Errorf("error setting file permissions: %v", err)
+		if err := f.Chmod(0755); err != nil {
+			return "", fmt.Errorf("error setting file permissions: %w", err)
 		}
+	}
+	if err := f.Sync(); err != nil {
+		return "", fmt.Errorf("error syncing micromamba download: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return "", fmt.Errorf("error closing micromamba download: %w", err)
+	}
+	if err := os.Rename(tmpPath, binpath); err != nil {
+		return "", fmt.Errorf("error installing micromamba download: %w", err)
 	}
 
 	return binpath, nil
