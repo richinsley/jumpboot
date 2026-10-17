@@ -12,6 +12,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path"
 	"strconv"
 	"sync"
@@ -96,6 +97,11 @@ type PythonProcess struct {
 
 	// exitChan is closed when the process exits, allowing waiters to unblock.
 	exitChan chan struct{}
+
+	// Signal forwarding belongs to this child, not the lifetime of the Go process.
+	signalChan     chan os.Signal
+	signalStop     chan struct{}
+	signalStopOnce sync.Once
 }
 
 // Module represents a Python module that can be embedded in a Go binary.
@@ -626,6 +632,7 @@ func (env *PythonEnvironment) NewPythonProcessFromString(script string, environm
 // If MonitorProcess is active, Wait uses the cached exit state; otherwise it
 // calls cmd.Wait() directly for backward compatibility.
 func (pp *PythonProcess) Wait() error {
+	defer pp.stopSignalHandler()
 	if pp.exitChan != nil {
 		// MonitorProcess is active, wait on its channel
 		<-pp.exitChan
@@ -672,6 +679,7 @@ func (pp *PythonProcess) Terminate() error {
 		d := make(chan struct{}, 1)
 		go func() {
 			pp.Cmd.Wait()
+			pp.stopSignalHandler()
 			close(d)
 		}()
 		done = d
@@ -719,6 +727,7 @@ func (pp *PythonProcess) MonitorProcess() {
 		pp.exitChan = make(chan struct{})
 		go func() {
 			err := pp.Cmd.Wait()
+			pp.stopSignalHandler()
 			pp.exitMu.Lock()
 			pp.exited = true
 			pp.exitErr = err
@@ -733,12 +742,35 @@ func (pp *PythonProcess) MonitorProcess() {
 }
 
 func setupSignalHandler(pp *PythonProcess) {
-	signalChan := make(chan os.Signal, 1)
-	setSignalsForChannel(signalChan)
+	pp.signalChan = make(chan os.Signal, 1)
+	pp.signalStop = make(chan struct{})
+	setSignalsForChannel(pp.signalChan)
 
 	go func() {
-		<-signalChan
-		// Terminate the child process when a signal is received
-		pp.Terminate()
+		select {
+		case <-pp.signalStop:
+			return
+		case <-pp.signalChan:
+			// Exit may have won the race with this buffered signal.
+			select {
+			case <-pp.signalStop:
+				return
+			default:
+			}
+			// Terminate the child process when a signal is received.
+			pp.Terminate()
+			pp.stopSignalHandler()
+		}
 	}()
+}
+
+func (pp *PythonProcess) stopSignalHandler() {
+	pp.signalStopOnce.Do(func() {
+		if pp.signalChan != nil {
+			signal.Stop(pp.signalChan)
+		}
+		if pp.signalStop != nil {
+			close(pp.signalStop)
+		}
+	})
 }

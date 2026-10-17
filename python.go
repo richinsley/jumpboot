@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 )
 
 // RunPythonReadCombined executes a Python script and returns combined stdout/stderr.
@@ -80,12 +81,29 @@ func (env *PythonEnvironment) BoundRunPythonScriptFromFile(scriptPath string, ar
 	// Create a channel to receive signals
 	signalChan := make(chan os.Signal, 1)
 	setSignalsForChannel(signalChan)
+	stopListener := make(chan struct{})
+	listenerDone := make(chan struct{})
+	defer func() {
+		signal.Stop(signalChan)
+		close(stopListener)
+		<-listenerDone
+	}()
 
 	// Wait for the command to finish or a signal to be received
 	go func() {
-		<-signalChan
-		// Kill the child process when a signal is received
-		cmd.Process.Kill()
+		defer close(listenerDone)
+		select {
+		case <-stopListener:
+			return
+		case <-signalChan:
+			select {
+			case <-stopListener:
+				return
+			default:
+			}
+			// Kill the child process when a signal is received.
+			cmd.Process.Kill()
+		}
 	}()
 
 	// Read from the command's stdout
