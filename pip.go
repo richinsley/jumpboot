@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"io"
 	"os/exec"
 )
 
@@ -37,16 +38,22 @@ func (env *PythonEnvironment) PipInstallPackages(packages []string, index_url st
 
 	installCmd := exec.Command(env.PipPath, args...)
 
-	// Capture both stdout AND stderr
-	var stdoutBuf, stderrBuf bytes.Buffer
-	installCmd.Stdout = &stdoutBuf
+	// Read stdout as pip writes it; scanning a bytes.Buffer concurrently with
+	// os/exec writing to it races and can miss progress lines.
+	stdout, err := installCmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("error creating pip stdout pipe: %w", err)
+	}
+	defer stdout.Close()
+	var stderrBuf bytes.Buffer
 	installCmd.Stderr = &stderrBuf
 
 	if err := installCmd.Start(); err != nil {
 		return fmt.Errorf("error starting pip install: %v", err)
 	}
 
-	scanner := bufio.NewScanner(&stdoutBuf)
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 32*1024), 1024*1024)
 	lineCount := int64(0)
 	for scanner.Scan() {
 		lineCount++
@@ -58,10 +65,18 @@ func (env *PythonEnvironment) PipInstallPackages(packages []string, index_url st
 			progressCallback(bardesc, lineCount, -1)
 		}
 	}
+	scanErr := scanner.Err()
+	if scanErr != nil {
+		// Keep draining so pip cannot block on a full pipe before Wait reaps it.
+		_, _ = io.Copy(io.Discard, stdout)
+	}
 
 	// Get the error (if any) *and* the stderr output.
 	if err := installCmd.Wait(); err != nil {
 		return fmt.Errorf("error installing package: %v, stderr: %s", err, stderrBuf.String())
+	}
+	if scanErr != nil {
+		return fmt.Errorf("error reading pip install output: %w", scanErr)
 	}
 
 	if progressCallback != nil {
