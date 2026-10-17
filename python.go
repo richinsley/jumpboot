@@ -22,26 +22,7 @@ func (env *PythonEnvironment) RunPythonReadCombined(scriptPath string, args ...s
 // RunPythonReadStdout executes a Python script and returns only stdout.
 // This is a blocking call that waits for the script to complete.
 func (env *PythonEnvironment) RunPythonReadStdout(scriptPath string, args ...string) (string, error) {
-	// put scriptPath at the front of the args
-	retv := ""
-	args = append([]string{scriptPath}, args...)
-	cmd := exec.Command(env.PythonPath, args...)
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return "", err
-	}
-	defer stdout.Close()
-
-	// continue to read the output until there is no more
-	// or an error occurs
-	if err := cmd.Start(); err != nil {
-		return "", err
-	}
-	scanner := bufio.NewScanner(stdout)
-	for scanner.Scan() {
-		retv += scanner.Text() + "\n"
-	}
-	return retv, nil
+	return RunReadStdout(env.PythonPath, append([]string{scriptPath}, args...)...)
 }
 
 // RunPythonScriptFromFile executes a Python script file, printing stderr to stdout.

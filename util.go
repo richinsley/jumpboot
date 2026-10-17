@@ -46,5 +46,12 @@ func RunReadStdout(binPath string, args ...string) (string, error) {
 	for scanner.Scan() {
 		retv += scanner.Text() + "\n"
 	}
-	return retv, nil
+	if err := scanner.Err(); err != nil {
+		// A failed scan may stop before EOF. Close the read end so a child
+		// still writing can exit, then reap it before returning the error.
+		stdout.Close()
+		_ = cmd.Wait()
+		return retv, err
+	}
+	return retv, cmd.Wait()
 }
