@@ -94,3 +94,69 @@ func TestGoombaBusyEnvironment(t *testing.T) {
 		}
 	}
 }
+
+// testRestoreLock checks that a restore holds goomba's lock on the new
+// environment from the end of the installation through the pip step, so
+// that others see it as busy, and that a restore whose lock somebody else
+// took first goes on without it.
+func testRestoreLock(t *testing.T, ctx context.Context, root string, ch *refChannel, opts GoombaOptions, python map[string]any) {
+	t.Helper()
+	restore := func(name string, cb ProgressCallback) (*PythonEnvironment, error) {
+		p := filepath.Join(t.TempDir(), name+".json")
+		writeJSON(t, p, EnvironmentSpec{Name: name, Channels: []string{ch.url}, Packages: []PackageSpec{pinned(python)}})
+		return CreateEnvironmentFromJSONFileGoomba(ctx, p, root, RestoreOptions{}, GoombaOptions{Client: ch.srv.Client()}, cb)
+	}
+
+	prefix := filepath.Join(root, "envs", "pipbusy")
+	var during []error
+	_, err := restore("pipbusy", func(msg string, current, total int64) {
+		if msg != "Python environment created successfully" || during != nil {
+			return
+		}
+		// Another caller, now: the environment is installed but its pip
+		// step has not run.
+		_, createErr := CreateEnvironmentGoombaWithOptions(ctx, "pipbusy", root, opts, nil)
+		during = []error{goomba.CheckComplete(prefix), createErr, RemoveIncompleteEnvironment("pipbusy", root)}
+	})
+	if err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if len(during) != 3 {
+		t.Fatal("the restore never reported the environment created")
+	}
+	for i, what := range []string{"CheckComplete", "create", "RemoveIncompleteEnvironment"} {
+		if !errors.Is(during[i], goomba.ErrPrefixLocked) {
+			t.Errorf("%s during the pip step: err = %v, want goomba.ErrPrefixLocked", what, during[i])
+		}
+	}
+	if err := goomba.CheckComplete(prefix); err != nil {
+		t.Errorf("after the restore: %v, want a finished, unlocked environment", err)
+	}
+
+	// Somebody takes the lock between goomba's installation and the
+	// restore's own locking: the restore goes on without it.
+	var holder *os.File
+	restoreAfterInstallHook = func(p string) {
+		d, err := os.Open(p)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		if err := syscall.Flock(int(d.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+			d.Close()
+			t.Error(err)
+			return
+		}
+		holder = d
+	}
+	defer func() { restoreAfterInstallHook = nil }()
+	env, err := restore("nolock", nil)
+	if holder == nil {
+		t.Fatal("the hook did not take the lock")
+	}
+	syscall.Flock(int(holder.Fd()), syscall.LOCK_UN)
+	holder.Close()
+	if err != nil || !env.IsNew || env.PipVersion.Major <= 0 {
+		t.Errorf("restore without the lock: env %+v, err %v", env, err)
+	}
+}

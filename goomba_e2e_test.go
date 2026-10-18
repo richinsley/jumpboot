@@ -452,20 +452,26 @@ func TestGoombaEndToEndOffline(t *testing.T) {
 		}
 	}
 
-	// A failing pip step removes the new environment, so a retry fails the
-	// same way instead of finding the environment in its way.
+	// A failing pip step leaves the environment, with its conda packages,
+	// where it is, and says so; a retry then finds it in its way.
 	pipFail := filepath.Join(t.TempDir(), "pipfail.json")
 	writeJSON(t, pipFail, EnvironmentSpec{Name: "pipfail", PythonVersion: "3.11", Channels: []string{ch.url},
 		Packages: []PackageSpec{pinned(python311), {Name: "--jumpboot-no-such-option", Version: "1", Source: "pip"}}})
-	for try := 1; try <= 2; try++ {
-		_, err := CreateEnvironmentFromJSONFileGoomba(ctx, pipFail, root, RestoreOptions{}, GoombaOptions{Client: ch.srv.Client()}, nil)
-		if err == nil || !strings.Contains(err.Error(), "error installing pip package") || !strings.Contains(err.Error(), "was removed") {
-			t.Errorf("pip failure, try %d: err = %v", try, err)
-		}
-		if _, err := os.Lstat(filepath.Join(root, "envs", "pipfail")); !os.IsNotExist(err) {
-			t.Errorf("pip failure, try %d: the environment was left (%v)", try, err)
-		}
+	pipFailEnv := filepath.Join(root, "envs", "pipfail")
+	_, err = CreateEnvironmentFromJSONFileGoomba(ctx, pipFail, root, RestoreOptions{}, GoombaOptions{Client: ch.srv.Client()}, nil)
+	if err == nil || !strings.Contains(err.Error(), "error installing pip package") || !strings.Contains(err.Error(), "the pip step failed; the environment is left at "+pipFailEnv) {
+		t.Errorf("pip failure: err = %v", err)
 	}
+	if err := goomba.CheckComplete(pipFailEnv); err != nil {
+		t.Errorf("pip failure: the environment is not a finished, unlocked one: %v", err)
+	}
+	if _, err := CreateEnvironmentFromJSONFileGoomba(ctx, pipFail, root, RestoreOptions{}, GoombaOptions{Client: ch.srv.Client()}, nil); !errors.Is(err, goomba.ErrPrefixNotEmpty) {
+		t.Errorf("pip failure, retry: err = %v, want goomba.ErrPrefixNotEmpty", err)
+	}
+
+	// While the restore checks the new environment and runs pip, the
+	// environment is busy for everybody else.
+	testRestoreLock(t, ctx, root, ch, opts, python311)
 
 	testChannelOrderHint(t, ctx, ch, python311)
 

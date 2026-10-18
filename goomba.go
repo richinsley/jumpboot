@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -48,6 +49,10 @@ var (
 	// whose SHA256 differs from that of the archive the channels offer
 	// for the same name, version and build.
 	ErrChecksumMismatch = errors.New("checksum mismatch")
+
+	// ErrEnvironmentNotIncomplete reports that RemoveIncompleteEnvironment
+	// removed nothing because the environment is a finished one.
+	ErrEnvironmentNotIncomplete = errors.New("environment is not incomplete")
 
 	// ErrBackendUnsupported reports an operation that the environment's
 	// backend cannot perform: installing a package into an existing
@@ -209,8 +214,11 @@ func goombaOptionsFor(pythonVersion, channel string) GoombaOptions {
 //     and nothing is removed: see RemoveIncompleteEnvironment;
 //   - an empty directory is filled; any other directory that is not an
 //     environment makes goomba refuse with goomba.ErrPrefixNotEmpty;
-//   - other errors (goomba.ErrUnsafePrefix, a file where the directory
-//     belongs) are returned wrapped.
+//   - other errors are returned wrapped, among them goomba.ErrUnsafePrefix
+//     for an environment that does not belong to the current user (one
+//     built as root and used by another account, for example) or that
+//     other users can write: the goomba backend reuses only the current
+//     user's own environments, where micromamba reuses any it can run.
 //
 // Either way, the Python and pip versions are checked as
 // CreateEnvironmentMamba checks them. The environment's Backend is
@@ -262,10 +270,9 @@ func CreateEnvironmentGoombaWithOptions(ctx context.Context, envName, rootDir st
 // and installs the result. The environment rootDir/envs/<spec name> must
 // not exist yet, or be an empty directory (goomba.ErrPrefixNotEmpty); an
 // interrupted or busy one is reported as CreateEnvironmentGoombaWithOptions
-// reports it. It reads the specification as
-// CreateEnvironmentFromJSONFileWithOptions does: when Packages is not
-// empty, only Packages is used; otherwise the legacy CondaPackages and
-// PipPackages are.
+// reports it. When Packages is not empty, the conda packages come from
+// Packages only, as for CreateEnvironmentFromJSONFileWithOptions; otherwise
+// the legacy CondaPackages are used.
 //
 //   - Channels: the specification's, else gopts.Channels, else
 //     conda-forge, in strict priority: every package comes from the first
@@ -281,20 +288,33 @@ func CreateEnvironmentGoombaWithOptions(ctx context.Context, envName, rootDir st
 //     match specs. gopts.Specs are added.
 //   - Checksums: with ropts.VerifyChecksums, every conda package of
 //     Packages that has a SHA256 must equal the solved archive's sha256
-//     (ErrChecksumMismatch). With ropts.Strict as well, Packages must not
-//     be empty, every entry of it needs a SHA256, and every package of the
-//     solution must be a conda package of Packages with a matching SHA256,
-//     so that everything conda installs was verified (pip packages are
-//     not: pip checksums are not checked). These checks run after
-//     resolving and before anything is installed, so a failure leaves no
-//     environment behind. (The micromamba restore only checks that
-//     checksums are present.)
-//   - Pip packages are installed afterwards as
-//     CreateEnvironmentFromJSONFileWithOptions installs them: the Packages
-//     with Source "pip" one at a time, or else the legacy PipPackages.
-//     If that, or the check of the new environment, fails, the
-//     environment this call created is removed again (unless the directory
-//     was replaced meanwhile); the error says whether it was.
+//     (ErrChecksumMismatch). With ropts.Strict as well, Packages must list
+//     conda packages, each with a SHA256, and every package of the solution
+//     must be one of them with a matching SHA256, so that everything conda
+//     installs was verified. Strict covers the conda packages only: pip
+//     entries need no SHA256 and are never checksum-verified. These checks
+//     run after resolving and before anything is installed, so a failure
+//     leaves no environment behind. (The micromamba restore only checks
+//     that checksums are present, for pip entries as well, so its Strict
+//     mode refuses a freeze that lists pip packages.)
+//   - Pip packages are installed afterwards: the Packages with Source "pip"
+//     one at a time (as CreateEnvironmentFromJSONFileWithOptions does),
+//     then the legacy PipPackages lines that Packages does not name, in
+//     order: the lines a freeze cannot pin as name==version (VCS, URL and
+//     local installs, editable ones, ===). Without Packages, the legacy
+//     PipPackages are installed. (CreateEnvironmentFromJSONFileWithOptions
+//     ignores PipPackages whenever Packages is not empty, so it drops those
+//     lines.) The pip step runs after ctx and gopts.Timeout, which cover
+//     resolving and installing the conda packages, and ignores them.
+//   - While the new environment is checked and the pip step runs, the
+//     environment is locked as goomba locks it during an installation, so
+//     that other callers see it as busy (goomba.ErrPrefixLocked) rather
+//     than reusing an environment whose pip step may still fail. If the
+//     lock cannot be taken, the restore goes on without it.
+//   - If the check or the pip step fails, the environment is left in
+//     place, with its conda packages installed; the error says so and
+//     where. Remove the directory before retrying: a retry fails with
+//     goomba.ErrPrefixNotEmpty.
 //
 // gopts otherwise applies as for CreateEnvironmentGoombaWithOptions. On
 // Windows it fails with ErrBackendUnsupported before reading filePath.
@@ -310,15 +330,8 @@ func CreateEnvironmentFromJSONFileGoomba(ctx context.Context, filePath, rootDir 
 	if err := json.Unmarshal(jsonData, &es); err != nil {
 		return nil, fmt.Errorf("error unmarshaling JSON: %w", err)
 	}
-	if ropts.Strict && ropts.VerifyChecksums {
-		if len(es.Packages) == 0 {
-			return nil, errors.New("strict mode: the specification lists no packages, so there are no checksums to verify")
-		}
-		for _, pkg := range es.Packages {
-			if pkg.SHA256 == "" {
-				return nil, fmt.Errorf("strict mode: package %q lacks SHA256 checksum", pkg.Name)
-			}
-		}
+	if err := checkStrictSpec(&es, ropts); err != nil {
+		return nil, err
 	}
 	condaSpecs, err := restoreCondaSpecs(&es)
 	if err != nil {
@@ -349,25 +362,54 @@ func CreateEnvironmentFromJSONFileGoomba(ctx context.Context, filePath, rootDir 
 		}
 		return nil, fmt.Errorf("error creating environment: %w", err)
 	}
-	// The identity of the new directory, so that a failure below removes
-	// this directory and nothing that replaced it.
-	created, err := os.Lstat(j.prefix)
-	if err != nil {
-		return nil, fmt.Errorf("error checking the new environment: %w", err)
+	// From here to the end of the pip step, hold the lock goomba holds
+	// while it installs, so that other callers see a busy environment
+	// instead of reusing one whose pip step may still fail. Someone may
+	// have taken it in the moment since goomba released it; then go on
+	// without it.
+	if restoreAfterInstallHook != nil {
+		restoreAfterInstallHook(j.prefix)
+	}
+	if unlock, err := lockEnvDir(j.prefix); err == nil {
+		defer unlock()
 	}
 	j.progress.say("Python environment created successfully", 100, 100)
 	env := j.env
 	setCondaEnvPaths(env, runtime.GOOS, j.requested)
 	if err := checkCondaEnvironment(env, j.requested); err != nil {
-		return nil, removeCreatedEnv(j.prefix, created, err)
+		return nil, leftInPlace(j.prefix, "checking the new environment", err)
 	}
 	if err := restorePipPackages(env, &es, progressCallback); err != nil {
-		return nil, removeCreatedEnv(j.prefix, created, err)
+		return nil, leftInPlace(j.prefix, "the pip step", err)
 	}
 	if progressCallback != nil {
 		progressCallback("Finished creating environment from JSON file", 100, 100)
 	}
 	return env, nil
+}
+
+// checkStrictSpec applies, before anything is resolved, the part of
+// ropts.Strict (with VerifyChecksums) that needs no solution: es.Packages
+// must list conda packages, each with a SHA256. Pip entries are exempt:
+// their checksums are never verified.
+func checkStrictSpec(es *EnvironmentSpec, ropts RestoreOptions) error {
+	if !ropts.Strict || !ropts.VerifyChecksums {
+		return nil
+	}
+	conda := 0
+	for _, pkg := range es.Packages {
+		if pkg.Source != "conda" {
+			continue
+		}
+		conda++
+		if pkg.SHA256 == "" {
+			return fmt.Errorf("strict mode: package %q lacks SHA256 checksum", pkg.Name)
+		}
+	}
+	if conda == 0 {
+		return errors.New("strict mode: the specification lists no conda packages, so there are no checksums to verify")
+	}
+	return nil
 }
 
 // restorePythonVersion returns the Python version a restore of es asks
@@ -387,16 +429,32 @@ func restorePythonVersion(es *EnvironmentSpec, fallback string) string {
 	return fallback
 }
 
-// restorePipPackages installs the pip packages of es into env as
-// CreateEnvironmentFromJSONFileWithOptions does: the Packages with Source
-// "pip" one at a time when Packages is not empty, else the legacy
+// restoreAfterInstallHook, if set, runs in CreateEnvironmentFromJSONFileGoomba
+// between goomba's installation and taking the environment's lock; tests
+// use it to take the lock first.
+var restoreAfterInstallHook func(prefix string)
+
+// leftInPlace explains a restore that failed after the conda packages were
+// installed: the environment stays where it is.
+func leftInPlace(prefix, stage string, cause error) error {
+	return fmt.Errorf("%w (the conda packages are installed, but %s failed; the environment is left at %s: remove it before retrying, or a retry fails with goomba.ErrPrefixNotEmpty)", cause, stage, prefix)
+}
+
+// restorePipPackages installs the pip packages of es into env. With
+// Packages: its packages with Source "pip", one at a time, as
+// CreateEnvironmentFromJSONFileWithOptions does; then the legacy
+// PipPackages lines that none of them names, in order, which are the lines
+// a freeze cannot pin as name==version. Without Packages: the legacy
 // PipPackages.
 func restorePipPackages(env *PythonEnvironment, es *EnvironmentSpec, progressCallback ProgressCallback) error {
+	rest := es.PipPackages
 	if len(es.Packages) > 0 {
+		pinned := map[string]bool{}
 		for _, pkg := range es.Packages {
 			if pkg.Source != "pip" {
 				continue
 			}
+			pinned[normalizePipName(pkg.Name)] = true
 			if err := env.PipInstallPackage(pkg.Name+"=="+pkg.Version, "https://pypi.org/simple", "", true, progressCallback); err != nil {
 				return fmt.Errorf("error installing pip package %s: %w", pkg.Name, err)
 			}
@@ -404,34 +462,36 @@ func restorePipPackages(env *PythonEnvironment, es *EnvironmentSpec, progressCal
 				progressCallback(fmt.Sprintf("Installing package %s...", pkg.Name), 50, 100)
 			}
 		}
-		return nil
+		rest = nil
+		for _, line := range es.PipPackages {
+			if name := pipLineName(line); name == "" || !pinned[name] {
+				rest = append(rest, line)
+			}
+		}
 	}
-	if len(es.PipPackages) > 0 {
-		if err := env.PipInstallPackages(es.PipPackages, "https://pypi.org/simple", "", true, progressCallback); err != nil {
+	if len(rest) > 0 {
+		if err := env.PipInstallPackages(rest, "https://pypi.org/simple", "", true, progressCallback); err != nil {
 			return fmt.Errorf("error installing pip packages: %w", err)
 		}
 	}
 	return nil
 }
 
-// removeCreatedEnv removes the environment directory path that this call
-// created, whose identity was created, after cause made the call fail: but
-// only if path is still that directory. The error wraps cause and says
-// whether the environment was removed.
-func removeCreatedEnv(path string, created fs.FileInfo, cause error) error {
-	fi, err := os.Lstat(path)
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
-		return fmt.Errorf("%w (the new environment %s no longer exists)", cause, path)
-	case err != nil:
-		return fmt.Errorf("%w (the new environment was left behind at %s: %v)", cause, path, err)
-	case !fi.IsDir() || !os.SameFile(fi, created):
-		return fmt.Errorf("%w (the new environment was left behind at %s: it was replaced, so it is not removed)", cause, path)
-	}
-	if err := os.RemoveAll(path); err != nil {
-		return fmt.Errorf("%w (the new environment was left behind at %s: removing it failed: %v)", cause, path, err)
-	}
-	return fmt.Errorf("%w (the new environment %s was removed)", cause, path)
+// pipNameRE matches the project name at the start of a pip requirement.
+var pipNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*`)
+
+// pipLineName returns the normalised project name a pip freeze line starts
+// with, or "" for a line that starts with an option (such as -e).
+func pipLineName(line string) string {
+	return normalizePipName(pipNameRE.FindString(strings.TrimSpace(line)))
+}
+
+// pipNameSepRE matches the runs of separators PEP 503 folds.
+var pipNameSepRE = regexp.MustCompile(`[-_.]+`)
+
+// normalizePipName normalises a Python project name as PEP 503 does.
+func normalizePipName(name string) string {
+	return pipNameSepRE.ReplaceAllString(strings.ToLower(name), "-")
 }
 
 // goombaJob is a goomba environment being created or reused.
@@ -523,6 +583,8 @@ func environmentStatus(prefix string) (bool, error) {
 		return false, fmt.Errorf("%w: %s: a goomba installation into it was interrupted; remove it with RemoveIncompleteEnvironment and create it again: %w", ErrIncompleteEnvironment, prefix, err)
 	case errors.Is(err, fs.ErrNotExist):
 		return false, nil
+	case errors.Is(err, goomba.ErrUnsafePrefix):
+		return false, fmt.Errorf("environment %s cannot be used by the goomba backend: it must belong to the current user, and neither it nor a directory above it may be writable by other users (micromamba has no such rule): %w", prefix, err)
 	default:
 		return false, fmt.Errorf("error checking environment %s: %w", prefix, err)
 	}
@@ -541,11 +603,17 @@ func environmentStatus(prefix string) (bool, error) {
 //	}
 //
 // It removes nothing else: goomba.RemoveIncomplete checks, under the
-// environment's lock, that the installation was interrupted, and its
-// errors are returned wrapped: goomba.ErrPrefixLocked while another
-// process installs or removes the environment (call it again later), an
-// error wrapping fs.ErrNotExist when there is nothing interrupted to
-// remove, goomba.ErrUnsafePrefix for a directory other users could change.
+// environment's lock, that the installation was interrupted. Its errors
+// are returned wrapped:
+//   - goomba.ErrPrefixLocked while another process installs or removes the
+//     environment (or a goomba restore runs its pip step): call it again
+//     later;
+//   - an error wrapping fs.ErrNotExist when the directory is missing or
+//     holds no environment;
+//   - ErrEnvironmentNotIncomplete, wrapping goomba's own "not removed: it
+//     holds a finished environment" error, for a finished environment;
+//   - goomba.ErrUnsafePrefix for a directory other users could change.
+//
 // envName is checked as the create functions check it, and on Windows it
 // fails with ErrBackendUnsupported, as they do.
 func RemoveIncompleteEnvironment(envName, rootDir string) error {
@@ -557,6 +625,11 @@ func RemoveIncompleteEnvironment(envName, rootDir string) error {
 	}
 	prefix := filepath.Join(rootDir, "envs", envName)
 	if err := goomba.RemoveIncomplete(prefix); err != nil {
+		// goomba's refusal of a finished environment wraps no sentinel:
+		// recognise it by asking whether the environment is finished.
+		if !errors.Is(err, goomba.ErrPrefixLocked) && !errors.Is(err, fs.ErrNotExist) && goomba.CheckComplete(prefix) == nil {
+			return fmt.Errorf("%w: %s holds a finished environment: %w", ErrEnvironmentNotIncomplete, prefix, err)
+		}
 		return fmt.Errorf("error removing the incomplete environment %s: %w", prefix, err)
 	}
 	return nil
@@ -789,9 +862,11 @@ var pipPinRE = regexp.MustCompile(`^([A-Za-z0-9][A-Za-z0-9._-]*)==([^\s=;@,#]+)$
 // freezeCondaMeta adds the conda packages of the goomba environment env,
 // read from its conda-meta records, to es, whose PipPackages are already
 // filled. It fills both forms of EnvironmentSpec:
-//   - the legacy CondaPackages ("name=version=build") and Channels, exactly
-//     as the micromamba freeze fills them: packages that pip freeze also
-//     lists are left out, and so are their channels;
+//   - the legacy CondaPackages ("name=version=build") as the micromamba
+//     freeze fills them: packages that pip freeze also lists are left out;
+//   - Channels: the channel of every conda package, in package name order
+//     (the micromamba freeze leaves out the channels of the packages pip
+//     lists);
 //   - Packages: every conda package (Source "conda", with its sha256 when
 //     the record has a valid one), then every pip package of the form
 //     name==version (Source "pip").
@@ -825,21 +900,13 @@ func (env *PythonEnvironment) freezeCondaMeta(es *EnvironmentSpec) error {
 			sha = ""
 		}
 		es.Packages = append(es.Packages, PackageSpec{Name: r.Name, Version: r.Version, Build: r.Build, SHA256: sha, Source: "conda"})
-		if pipNames[strings.ToLower(r.Name)] {
-			continue
+		// Every package's channel, even of one pip also lists: Packages
+		// pins it, so a restore needs its channel.
+		if c := shortChannelName(recordChannel(r)); c != "" && !slices.Contains(es.Channels, c) {
+			es.Channels = append(es.Channels, c)
 		}
-		es.CondaPackages = append(es.CondaPackages, r.Name+"="+r.Version+"="+r.Build)
-		if c := shortChannelName(recordChannel(r)); c != "" {
-			found := false
-			for _, have := range es.Channels {
-				if have == c {
-					found = true
-					break
-				}
-			}
-			if !found {
-				es.Channels = append(es.Channels, c)
-			}
+		if !pipNames[strings.ToLower(r.Name)] {
+			es.CondaPackages = append(es.CondaPackages, r.Name+"="+r.Version+"="+r.Build)
 		}
 	}
 	for _, line := range es.PipPackages {
