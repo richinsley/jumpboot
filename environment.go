@@ -829,6 +829,14 @@ func CreateVenvEnvironment(baseEnv *PythonEnvironment, venvPath string, options 
 // The resulting JSON file can be used with CreateEnvironmentFromJSONFile to
 // recreate an identical environment.
 //
+// For a goomba environment (Backend BackendGoomba), the conda packages are
+// read from the environment's conda-meta records instead of running
+// micromamba, and recorded in Packages with Source "conda", version, build
+// and sha256, every one of them (pip's view of the same packages does not
+// remove them); restore such a file with CreateEnvironmentFromJSONFileGoomba.
+// An environment whose goomba installation did not finish is refused
+// (ErrIncompleteEnvironment).
+//
 // File URLs in pip freeze output are cleaned to show only package names.
 func (env *PythonEnvironment) FreezeToFile(filePath string) error {
 	return env.freezeToFile(filePath, nil)
@@ -849,12 +857,13 @@ func (env *PythonEnvironment) freezeToFile(filePath string, processEnv []string)
 		PythonVersion: env.PythonVersion.MinorString(),
 	}
 
-	if env.MicromambaVersion.Major != -1 { //check if valid version
+	if env.MicromambaVersion.Major != -1 && env.Backend != BackendGoomba { //check if valid version
 		spec.MicromambaVersion = env.MicromambaVersion.String()
 	}
 
-	// we'll need one or both of these
-	if env.MicromambaPath == "" && env.PipPath == "" {
+	// we'll need one or both of these (a goomba environment's conda
+	// packages come from its conda-meta records)
+	if env.MicromambaPath == "" && env.PipPath == "" && env.Backend != BackendGoomba {
 		return fmt.Errorf("no micromamba or pip path found")
 	}
 
@@ -898,8 +907,13 @@ func (env *PythonEnvironment) freezeToFile(filePath string, processEnv []string)
 	}
 	// --- End of Pip Package Handling ---
 
-	// 2. Get conda packages (if micromamba is available).
-	if env.MicromambaPath != "" {
+	// 2. Get conda packages: from conda-meta for a goomba environment,
+	// else from micromamba (if available).
+	if env.Backend == BackendGoomba {
+		if err := env.freezeCondaMeta(&spec); err != nil {
+			return err
+		}
+	} else if env.MicromambaPath != "" {
 		cmd := exec.Command(env.MicromambaPath, "list", "-n", env.EnvironmentName, "--json")
 		if processEnv != nil {
 			cmd.Env = append(append([]string(nil), processEnv...), "MAMBA_ROOT_PREFIX="+env.RootDir)
