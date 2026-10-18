@@ -89,11 +89,13 @@
 //     checksums against the channel before installing anything (the
 //     micromamba restore only checks that they are present); with Strict,
 //     every solved package must have a checksum in the specification (pip
-//     packages are exempt and never verified). Pip packages are installed
-//     afterwards, outside ctx and the Timeout; if that fails, the
-//     environment is left in place (remove it before retrying). No freeze
-//     records channel priority, so list several channels highest priority
-//     first.
+//     packages are exempt and never verified). The check of the new
+//     environment and the pip step run inside goomba's transaction, before
+//     it commits: nobody can reuse the environment until pip has finished,
+//     and a failure or cancellation rolls everything back. The Timeout
+//     covers resolving, installing and pip together: raise it for large pip
+//     installs. No freeze records channel priority, so list several
+//     channels highest priority first.
 //   - FreezeToFile reads the conda packages from conda-meta and writes both
 //     the legacy lists and Packages with their sha256. The goomba restore
 //     reads all of it; the micromamba restores do not (see FreezeToFile).
@@ -104,7 +106,9 @@
 //     restore is still running pip, is refused with goomba.ErrPrefixLocked,
 //     without waiting; an empty directory is filled, any other directory
 //     that is not an environment refused (goomba.ErrPrefixNotEmpty).
-//   - A failed or cancelled creation is rolled back. One whose process
+//   - A failed or cancelled creation is rolled back, also when the check
+//     of the new environment (python and pip versions), which runs inside
+//     goomba's transaction, fails. One whose process
 //     crashed or was killed is refused with ErrIncompleteEnvironment;
 //     jumpboot never removes it by itself. Call
 //     RemoveIncompleteEnvironment, then create the environment again.
