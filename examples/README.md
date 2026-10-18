@@ -4,7 +4,7 @@ Working examples demonstrating jumpboot features.
 
 ## Getting Started
 
-Each example creates a Python environment in `examples/environments/`. The first run downloads micromamba and installs dependencies.
+Each example creates a Python environment in `examples/environments/`. The first run downloads micromamba and installs dependencies (the goomba example creates its environment without micromamba).
 
 ```bash
 cd examples/repl
@@ -16,6 +16,7 @@ go run main.go
 | Example | Description |
 |---------|-------------|
 | [repl](repl/) | Interactive Python REPL from Go |
+| [goomba](goomba/) | The REPL on an environment created with the goomba backend (no micromamba) |
 | [jsonqueueserver](jsonqueueserver/) | Bidirectional RPC with MessagePack |
 | [jsonqueue](jsonqueue/) | Legacy JSON-based queue communication |
 | [embedded_packages](embedded_packages/) | Complex package structures with go:embed |

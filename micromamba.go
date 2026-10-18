@@ -163,7 +163,16 @@ func ExpectMicromamba(binFolder string, progressCallback ProgressCallback) (stri
 //
 // The installation is performed with --no-rc to avoid configuration conflicts
 // and uses the environment's prefix directly.
+//
+// A goomba environment (Backend BackendGoomba) has no micromamba, and goomba
+// does not install into an existing environment: for one, the error wraps
+// ErrBackendUnsupported. Create it with the package in GoombaOptions.Specs,
+// or restore it from a JSON specification with
+// CreateEnvironmentFromJSONFileGoomba.
 func (env *PythonEnvironment) MicromambaInstallPackage(packageToInstall string, channel string) error {
+	if env.Backend == BackendGoomba {
+		return fmt.Errorf("cannot install %q into %s: %w: goomba does not install into an existing environment; create it with the package in GoombaOptions.Specs or restore it with CreateEnvironmentFromJSONFileGoomba", packageToInstall, env.EnvPath, ErrBackendUnsupported)
+	}
 	var installCmd *exec.Cmd
 	if channel != "" {
 		/*
