@@ -400,32 +400,38 @@ func CreateEnvironmentMamba(envName string, rootDir string, pythonVersion string
 // directories. CreateEnvironmentMamba and the goomba functions share it, so
 // the environments of both backends have the same paths.
 func setCondaEnvPaths(env *PythonEnvironment, goos string, requestedVersion Version) {
-	env.EnvPath = filepath.Join(env.RootDir, "envs", env.EnvironmentName)
+	setCondaEnvPathsAt(env, filepath.Join(env.RootDir, "envs", env.EnvironmentName), goos, requestedVersion)
+}
+
+// setCondaEnvPathsAt fills the path fields of env for the conda environment
+// in the directory envPath, as setCondaEnvPaths describes.
+func setCondaEnvPathsAt(env *PythonEnvironment, envPath, goos string, requestedVersion Version) {
+	env.EnvPath = envPath
 	if goos == "windows" {
-		env.EnvBinPath = filepath.Join(env.RootDir, "envs", env.EnvironmentName)
+		env.EnvBinPath = envPath
 		env.PythonPath = filepath.Join(env.EnvBinPath, "python.exe")
-		env.PipPath = filepath.Join(env.RootDir, "envs", env.EnvironmentName, "Scripts", "pip.exe")
+		env.PipPath = filepath.Join(envPath, "Scripts", "pip.exe")
 	} else {
-		env.EnvBinPath = filepath.Join(env.RootDir, "envs", env.EnvironmentName, "bin")
+		env.EnvBinPath = filepath.Join(envPath, "bin")
 		env.PythonPath = filepath.Join(env.EnvBinPath, "python")
 		env.PipPath = filepath.Join(env.EnvBinPath, "pip")
 	}
 
-	env.SitePackagesPath = filepath.Join(env.RootDir, "envs", env.EnvironmentName, "lib", "python"+requestedVersion.MinorString(), "site-packages")
+	env.SitePackagesPath = filepath.Join(envPath, "lib", "python"+requestedVersion.MinorString(), "site-packages")
 
 	// find the python lib path
-	env.EnvLibPath = filepath.Join(env.RootDir, "envs", env.EnvironmentName, "lib")
+	env.EnvLibPath = filepath.Join(envPath, "lib")
 	env.PythonLibPath = env.EnvLibPath
 	if goos == "windows" {
-		env.PythonLibPath = filepath.Join(env.RootDir, "envs", env.EnvironmentName, "python"+requestedVersion.MinorStringCompact()+".dll")
+		env.PythonLibPath = filepath.Join(envPath, "python"+requestedVersion.MinorStringCompact()+".dll")
 	} else if goos == "darwin" {
-		env.PythonLibPath = filepath.Join(env.RootDir, "envs", env.EnvironmentName, "lib", "libpython"+requestedVersion.MinorString()+".dylib")
+		env.PythonLibPath = filepath.Join(envPath, "lib", "libpython"+requestedVersion.MinorString()+".dylib")
 	} else {
-		env.PythonLibPath = filepath.Join(env.RootDir, "envs", env.EnvironmentName, "lib", "libpython"+requestedVersion.MinorString()+".so")
+		env.PythonLibPath = filepath.Join(envPath, "lib", "libpython"+requestedVersion.MinorString()+".so")
 	}
 
 	// find the python headers path
-	env.PythonHeadersPath = filepath.Join(env.RootDir, "envs", env.EnvironmentName, "include", "python"+requestedVersion.MinorString())
+	env.PythonHeadersPath = filepath.Join(envPath, "include", "python"+requestedVersion.MinorString())
 }
 
 // checkCondaEnvironment runs the checks CreateEnvironmentMamba makes on a
