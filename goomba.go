@@ -35,12 +35,13 @@ import (
 // cache directory other users could change), context.DeadlineExceeded (the
 // GoombaOptions.Timeout or the caller's deadline) and context.Canceled.
 var (
-	// ErrIncompleteEnvironment reports an environment directory that holds
-	// conda-meta/.goomba-incomplete: a goomba installation into it was
-	// interrupted without rolling back (the process crashed or was
-	// killed), or is still running. jumpboot removes nothing; once no
-	// installation is running, remove the directory and create the
-	// environment again.
+	// ErrIncompleteEnvironment reports an environment directory that a
+	// goomba installation left unfinished: the process doing it crashed or
+	// was killed, so it could not roll back (goomba.CheckComplete reports
+	// goomba.ErrIncomplete, which the error also wraps). jumpboot never
+	// removes such a directory on its own: call RemoveIncompleteEnvironment,
+	// then create the environment again. An installation that is still
+	// running is reported as goomba.ErrPrefixLocked instead.
 	ErrIncompleteEnvironment = errors.New("environment is incomplete")
 
 	// ErrChecksumMismatch reports a conda package of a JSON specification
@@ -58,10 +59,6 @@ var (
 // defaultGoombaTimeout bounds resolving plus installing when
 // GoombaOptions.Timeout is zero.
 const defaultGoombaTimeout = 10 * time.Minute
-
-// goombaIncompleteMarker is the file goomba keeps in conda-meta while it
-// installs into a prefix.
-const goombaIncompleteMarker = ".goomba-incomplete"
 
 // goombaHostOS is the operating system the goomba functions check for
 // support; tests replace it.
@@ -200,10 +197,20 @@ func goombaOptionsFor(pythonVersion, channel string) GoombaOptions {
 // micromamba's rootDir/pkgs; goomba refuses cache directories that other
 // users could change. On any error goomba removes what it installed.
 //
-// An existing rootDir/envs/envName is reused as it is, as
-// CreateEnvironmentMamba does (opts.Specs, Channels and the like are then
-// ignored), unless it holds conda-meta/.goomba-incomplete: then the error
-// wraps ErrIncompleteEnvironment and nothing is removed.
+// What happens to an existing rootDir/envs/envName depends on what
+// goomba.CheckComplete finds there:
+//   - a finished environment, whichever backend made it, is reused as it
+//     is, as CreateEnvironmentMamba does (opts.Specs, Channels and the like
+//     are then ignored);
+//   - one that another process is installing or removing is an error
+//     wrapping goomba.ErrPrefixLocked (nothing is waited for);
+//   - one whose goomba installation was interrupted is an
+//     ErrIncompleteEnvironment error, also wrapping goomba.ErrIncomplete,
+//     and nothing is removed: see RemoveIncompleteEnvironment;
+//   - an empty directory is filled; any other directory that is not an
+//     environment makes goomba refuse with goomba.ErrPrefixNotEmpty;
+//   - other errors (goomba.ErrUnsafePrefix, a file where the directory
+//     belongs) are returned wrapped.
 //
 // Either way, the Python and pip versions are checked as
 // CreateEnvironmentMamba checks them. The environment's Backend is
@@ -227,14 +234,16 @@ func CreateEnvironmentGoombaWithOptions(ctx context.Context, envName, rootDir st
 	if err != nil {
 		return nil, err
 	}
-	if _, err := os.Stat(j.env.EnvPath); os.IsNotExist(err) {
+	exists, err := environmentStatus(j.prefix)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
 		j.env.IsNew = true
 		if err := j.create(ctx, goombaSpecs(j.opts.PythonVersion, j.opts.Specs), nil); err != nil {
 			return nil, fmt.Errorf("error creating environment: %w", err)
 		}
 		j.progress.say("Python environment created successfully", 100, 100)
-	} else if err := j.checkComplete(); err != nil {
-		return nil, err
 	}
 	setCondaEnvPaths(j.env, runtime.GOOS, j.requested)
 	if err := checkCondaEnvironment(j.env, j.requested); err != nil {
@@ -251,7 +260,9 @@ func CreateEnvironmentGoombaWithOptions(ctx context.Context, envName, rootDir st
 // environment and then installs each conda package separately, it solves
 // python, pip and every conda package of the specification in one solve
 // and installs the result. The environment rootDir/envs/<spec name> must
-// not exist yet (goomba.ErrPrefixNotEmpty). It reads the specification as
+// not exist yet, or be an empty directory (goomba.ErrPrefixNotEmpty); an
+// interrupted or busy one is reported as CreateEnvironmentGoombaWithOptions
+// reports it. It reads the specification as
 // CreateEnvironmentFromJSONFileWithOptions does: when Packages is not
 // empty, only Packages is used; otherwise the legacy CondaPackages and
 // PipPackages are.
@@ -324,7 +335,9 @@ func CreateEnvironmentFromJSONFileGoomba(ctx context.Context, filePath, rootDir 
 	if err != nil {
 		return nil, err
 	}
-	if err := j.checkComplete(); err != nil {
+	// An existing environment is never reused (goomba refuses to install
+	// into it), but an interrupted or busy one is reported as such.
+	if _, err := environmentStatus(j.prefix); err != nil {
 		return nil, err
 	}
 	j.env.IsNew = true
@@ -490,24 +503,63 @@ func checkEnvName(name string) error {
 	return nil
 }
 
-// checkComplete returns an ErrIncompleteEnvironment error when the
-// environment holds goomba's incomplete marker.
-func (j *goombaJob) checkComplete() error {
-	return checkGoombaComplete(j.env.EnvPath)
-}
-
-// checkGoombaComplete returns an ErrIncompleteEnvironment error when the
-// environment envPath holds goomba's incomplete marker.
-func checkGoombaComplete(envPath string) error {
-	_, err := os.Lstat(filepath.Join(envPath, "conda-meta", goombaIncompleteMarker))
+// environmentStatus reports, with goomba.CheckComplete, whether prefix
+// holds an environment to reuse (true), or nothing a creation must leave
+// alone (false: it is missing, an empty directory, or not an environment;
+// goomba refuses to install into a non-empty one with
+// goomba.ErrPrefixNotEmpty). An environment another process is installing
+// or removing is an error wrapping goomba.ErrPrefixLocked, an interrupted
+// one an ErrIncompleteEnvironment error that also wraps
+// goomba.ErrIncomplete; any other error (goomba.ErrUnsafePrefix, ENOTDIR,
+// ...) is returned wrapped. Nothing is waited for or removed.
+func environmentStatus(prefix string) (bool, error) {
+	err := goomba.CheckComplete(prefix)
 	switch {
 	case err == nil:
-		return fmt.Errorf("%w: %s: a goomba installation into it was interrupted or is still running; once none is running, remove the directory and create the environment again", ErrIncompleteEnvironment, envPath)
+		return true, nil
+	case errors.Is(err, goomba.ErrPrefixLocked):
+		return false, fmt.Errorf("environment %s is busy: another process is installing or removing it: %w", prefix, err)
+	case errors.Is(err, goomba.ErrIncomplete):
+		return false, fmt.Errorf("%w: %s: a goomba installation into it was interrupted; remove it with RemoveIncompleteEnvironment and create it again: %w", ErrIncompleteEnvironment, prefix, err)
 	case errors.Is(err, fs.ErrNotExist):
-		return nil
+		return false, nil
 	default:
-		return fmt.Errorf("error checking environment %s: %w", envPath, err)
+		return false, fmt.Errorf("error checking environment %s: %w", prefix, err)
 	}
+}
+
+// RemoveIncompleteEnvironment removes the environment rootDir/envs/envName
+// when a goomba installation into it was interrupted, the state that the
+// goomba functions report as ErrIncompleteEnvironment. The intended pattern
+// is:
+//
+//	env, err := jumpboot.CreateEnvironmentGoomba(name, root, "3.11", "conda-forge", nil)
+//	if errors.Is(err, jumpboot.ErrIncompleteEnvironment) {
+//		if err = jumpboot.RemoveIncompleteEnvironment(name, root); err == nil {
+//			env, err = jumpboot.CreateEnvironmentGoomba(name, root, "3.11", "conda-forge", nil)
+//		}
+//	}
+//
+// It removes nothing else: goomba.RemoveIncomplete checks, under the
+// environment's lock, that the installation was interrupted, and its
+// errors are returned wrapped: goomba.ErrPrefixLocked while another
+// process installs or removes the environment (call it again later), an
+// error wrapping fs.ErrNotExist when there is nothing interrupted to
+// remove, goomba.ErrUnsafePrefix for a directory other users could change.
+// envName is checked as the create functions check it, and on Windows it
+// fails with ErrBackendUnsupported, as they do.
+func RemoveIncompleteEnvironment(envName, rootDir string) error {
+	if err := checkGoombaHost(); err != nil {
+		return err
+	}
+	if err := checkEnvName(envName); err != nil {
+		return err
+	}
+	prefix := filepath.Join(rootDir, "envs", envName)
+	if err := goomba.RemoveIncomplete(prefix); err != nil {
+		return fmt.Errorf("error removing the incomplete environment %s: %w", prefix, err)
+	}
+	return nil
 }
 
 // create resolves specs and installs the result into the job's prefix
@@ -744,17 +796,19 @@ var pipPinRE = regexp.MustCompile(`^([A-Za-z0-9][A-Za-z0-9._-]*)==([^\s=;@,#]+)$
 //     the record has a valid one), then every pip package of the form
 //     name==version (Source "pip").
 func (env *PythonEnvironment) freezeCondaMeta(es *EnvironmentSpec) error {
-	if err := checkGoombaComplete(env.EnvPath); err != nil {
+	abs, err := filepath.Abs(env.EnvPath)
+	if err != nil {
+		return fmt.Errorf("error reading conda-meta of %s: %w", env.EnvPath, err)
+	}
+	// An interrupted environment, or one another process is installing or
+	// removing, is refused.
+	if _, err := environmentStatus(abs); err != nil {
 		return err
 	}
 	// link.ReadCondaMeta reads only regular files of bounded size from a
 	// safely resolved conda-meta, and, unlike lock.FromPrefix, accepts
 	// records without an https URL or a sha256 (such as micromamba writes
 	// for explicit or file:// installs).
-	abs, err := filepath.Abs(env.EnvPath)
-	if err != nil {
-		return fmt.Errorf("error reading conda-meta of %s: %w", env.EnvPath, err)
-	}
 	recs, err := link.ReadCondaMeta(abs)
 	if err != nil {
 		return fmt.Errorf("error reading conda-meta of %s: %w", env.EnvPath, err)

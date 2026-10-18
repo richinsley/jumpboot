@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 
@@ -40,5 +41,56 @@ func testPrefixLocked(t *testing.T, ctx context.Context, root string, ch *refCha
 	}
 	if names, err := d.Readdirnames(-1); err != nil || len(names) != 0 {
 		t.Errorf("the locked directory holds %q (%v)", names, err)
+	}
+}
+
+// lockPrefix takes an exclusive flock on the directory p through its own
+// open file description, as a goomba installation or removal in another
+// process holds it, until the test ends.
+func lockPrefix(t *testing.T, p string) {
+	t.Helper()
+	d, err := os.Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Flock(int(d.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		d.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		syscall.Flock(int(d.Fd()), syscall.LOCK_UN)
+		d.Close()
+	})
+}
+
+// TestGoombaBusyEnvironment checks that an environment another process
+// holds locked, finished or not, is reported as goomba.ErrPrefixLocked by
+// every goomba function, and left alone.
+func TestGoombaBusyEnvironment(t *testing.T) {
+	root := t.TempDir()
+	fakeCondaEnv(t, root, "done", "3.11.9", "24.0")
+	interruptedEnv(t, root, "half")
+	for _, name := range []string{"done", "half"} {
+		env := filepath.Join(root, "envs", name)
+		lockPrefix(t, env)
+		_, err := CreateEnvironmentGoomba(name, root, "3.11", "", nil)
+		if !errors.Is(err, goomba.ErrPrefixLocked) || errors.Is(err, ErrIncompleteEnvironment) || !strings.Contains(err.Error(), "another process is installing or removing it") {
+			t.Errorf("%s: create: err = %v, want goomba.ErrPrefixLocked", name, err)
+		}
+		spec := filepath.Join(t.TempDir(), "env.json")
+		writeJSON(t, spec, EnvironmentSpec{Name: name, PythonVersion: "3.11"})
+		if _, err := CreateEnvironmentFromJSONFileGoomba(context.Background(), spec, root, RestoreOptions{}, GoombaOptions{}, nil); !errors.Is(err, goomba.ErrPrefixLocked) {
+			t.Errorf("%s: restore: err = %v, want goomba.ErrPrefixLocked", name, err)
+		}
+		g := &PythonEnvironment{BaseEnvironment: BaseEnvironment{EnvironmentName: name, RootDir: root, EnvPath: env, Backend: BackendGoomba}}
+		if err := g.FreezeToFile(filepath.Join(t.TempDir(), "out.json")); !errors.Is(err, goomba.ErrPrefixLocked) {
+			t.Errorf("%s: freeze: err = %v, want goomba.ErrPrefixLocked", name, err)
+		}
+		if err := RemoveIncompleteEnvironment(name, root); !errors.Is(err, goomba.ErrPrefixLocked) {
+			t.Errorf("%s: remove: err = %v, want goomba.ErrPrefixLocked", name, err)
+		}
+		if _, err := os.Stat(filepath.Join(env, "conda-meta")); err != nil {
+			t.Errorf("%s: the environment was touched: %v", name, err)
+		}
 	}
 }

@@ -292,6 +292,32 @@ func TestGoombaEndToEndOffline(t *testing.T) {
 		t.Fatalf("reuse: IsNew %v, %d requests, %v", again != nil && again.IsNew, ch.requests()-before, err)
 	}
 
+	// Recovery from an interrupted installation: refused with
+	// ErrIncompleteEnvironment, removed with RemoveIncompleteEnvironment,
+	// then created.
+	interruptedEnv(t, root, "recover")
+	if _, err := CreateEnvironmentGoombaWithOptions(ctx, "recover", root, opts, nil); !errors.Is(err, ErrIncompleteEnvironment) || !errors.Is(err, goomba.ErrIncomplete) {
+		t.Fatalf("interrupted: err = %v, want ErrIncompleteEnvironment", err)
+	}
+	if err := RemoveIncompleteEnvironment("recover", root); err != nil {
+		t.Fatalf("RemoveIncompleteEnvironment: %v", err)
+	}
+	recovered, err := CreateEnvironmentGoombaWithOptions(ctx, "recover", root, opts, nil)
+	if err != nil || !recovered.IsNew {
+		t.Fatalf("create after the removal: IsNew %v, err %v", recovered != nil && recovered.IsNew, err)
+	}
+	if out, err := RunReadStdout(recovered.PythonPath, "-c", "import pip; print('ok')"); err != nil || strings.TrimSpace(out) != "ok" {
+		t.Errorf("recovered environment: %q, %v", out, err)
+	}
+	// An empty directory is filled, not reused.
+	if err := os.MkdirAll(filepath.Join(root, "envs", "empty"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	filled, err := CreateEnvironmentGoombaWithOptions(ctx, "empty", root, opts, nil)
+	if err != nil || !filled.IsNew {
+		t.Fatalf("empty directory: IsNew %v, err %v", filled != nil && filled.IsNew, err)
+	}
+
 	// Freeze: conda packages from conda-meta, with their checksums.
 	frozen := filepath.Join(t.TempDir(), "env.json")
 	if err := env.FreezeToFile(frozen); err != nil {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -58,6 +59,10 @@ func fakeCondaEnv(t *testing.T, root, name, python, pip string) {
 		t.Fatal(err)
 	}
 	if err := os.MkdirAll(filepath.Join(env.EnvPath, "conda-meta"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A history makes it a finished environment for goomba.CheckComplete.
+	if err := os.WriteFile(filepath.Join(env.EnvPath, "conda-meta", "history"), []byte("==> 2026-10-17 00:00:00 <==\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -199,8 +204,8 @@ func TestGoombaRefusesIncompleteEnvironment(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err := CreateEnvironmentGoomba("half", root, "3.11", "", nil)
-	if !errors.Is(err, ErrIncompleteEnvironment) {
-		t.Fatalf("err = %v, want ErrIncompleteEnvironment", err)
+	if !errors.Is(err, ErrIncompleteEnvironment) || !errors.Is(err, goomba.ErrIncomplete) || !strings.Contains(err.Error(), "RemoveIncompleteEnvironment") {
+		t.Fatalf("err = %v, want ErrIncompleteEnvironment and goomba.ErrIncomplete", err)
 	}
 	specFile := filepath.Join(t.TempDir(), "env.json")
 	writeJSON(t, specFile, EnvironmentSpec{Name: "half", PythonVersion: "3.11"})
@@ -208,7 +213,7 @@ func TestGoombaRefusesIncompleteEnvironment(t *testing.T) {
 		t.Fatalf("restore: err = %v, want ErrIncompleteEnvironment", err)
 	}
 	env := &PythonEnvironment{BaseEnvironment: BaseEnvironment{EnvironmentName: "half", RootDir: root, EnvPath: filepath.Join(root, "envs", "half"), Backend: BackendGoomba}}
-	if err := env.FreezeToFile(filepath.Join(t.TempDir(), "out.json")); !errors.Is(err, ErrIncompleteEnvironment) {
+	if err := env.FreezeToFile(filepath.Join(t.TempDir(), "out.json")); !errors.Is(err, ErrIncompleteEnvironment) || !errors.Is(err, goomba.ErrIncomplete) {
 		t.Fatalf("freeze: err = %v, want ErrIncompleteEnvironment", err)
 	}
 	// Nothing was removed.
@@ -1114,5 +1119,132 @@ func TestRemoveCreatedEnv(t *testing.T) {
 	}
 	if err := removeCreatedEnv(p, fi, cause); !errors.Is(err, cause) || !strings.Contains(err.Error(), "no longer exists") {
 		t.Errorf("gone: err = %v", err)
+	}
+}
+
+// TestGoombaEnvironmentStatus checks what the goomba functions do with an
+// existing rootDir/envs/NAME that is not a finished environment. Nothing
+// listens on the channel's port: a request that got as far as the network
+// fails there.
+func TestGoombaEnvironmentStatus(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the goomba functions refuse Windows")
+	}
+	opts := GoombaOptions{PythonVersion: "3.11", Channels: []string{"https://127.0.0.1:1/none"}, Timeout: time.Minute}
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, env string)
+		check func(error) bool
+		want  string
+	}{
+		{"not an environment", func(t *testing.T, env string) {
+			mkdir(t, env)
+			writeFileAt(t, filepath.Join(env, "data.txt"))
+		}, func(err error) bool { return errors.Is(err, goomba.ErrPrefixNotEmpty) }, "goomba.ErrPrefixNotEmpty"},
+		{"conda-meta without history", func(t *testing.T, env string) {
+			mkdir(t, filepath.Join(env, "conda-meta"))
+			writeFileAt(t, filepath.Join(env, "conda-meta", "x-1-0.json"))
+		}, func(err error) bool { return errors.Is(err, goomba.ErrPrefixNotEmpty) }, "goomba.ErrPrefixNotEmpty"},
+		{"only an empty conda-meta", func(t *testing.T, env string) {
+			mkdir(t, filepath.Join(env, "conda-meta"))
+		}, func(err error) bool {
+			return errors.Is(err, ErrIncompleteEnvironment) && errors.Is(err, goomba.ErrIncomplete)
+		}, "ErrIncompleteEnvironment"},
+		{"writable by others", func(t *testing.T, env string) {
+			fakeCondaEnv(t, filepath.Dir(filepath.Dir(env)), filepath.Base(env), "3.11.9", "24.0")
+			if err := os.Chmod(env, 0o777); err != nil {
+				t.Fatal(err)
+			}
+		}, func(err error) bool { return errors.Is(err, goomba.ErrUnsafePrefix) }, "goomba.ErrUnsafePrefix"},
+		{"a file", func(t *testing.T, env string) {
+			mkdir(t, filepath.Dir(env))
+			writeFileAt(t, env)
+		}, func(err error) bool { return err != nil && strings.Contains(err.Error(), "error checking environment") }, "an error checking the environment"},
+		{"an empty directory", func(t *testing.T, env string) {
+			mkdir(t, env)
+		}, func(err error) bool {
+			// Created, not reused: the request reaches the (missing) channel.
+			return err != nil && strings.Contains(err.Error(), "127.0.0.1:1") && !errors.Is(err, goomba.ErrPrefixNotEmpty)
+		}, "a creation reaching the channel"},
+	} {
+		root := t.TempDir()
+		env := filepath.Join(root, "envs", "e")
+		tc.setup(t, env)
+		_, err := CreateEnvironmentGoombaWithOptions(context.Background(), "e", root, opts, nil)
+		if !tc.check(err) {
+			t.Errorf("%s: err = %v, want %s", tc.name, err, tc.want)
+		}
+		if tc.name == "an empty directory" {
+			if names, err := os.ReadDir(env); err != nil || len(names) != 0 {
+				t.Errorf("%s: the directory holds %v (%v) after the failed creation", tc.name, names, err)
+			}
+		}
+	}
+}
+
+func mkdir(t *testing.T, p string) {
+	t.Helper()
+	if err := os.MkdirAll(p, 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeFileAt(t *testing.T, p string) {
+	t.Helper()
+	if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// interruptedEnv lays out root/envs/name as a goomba installation killed
+// halfway leaves it: some files and the incomplete marker, no lock held.
+func interruptedEnv(t *testing.T, root, name string) string {
+	t.Helper()
+	env := filepath.Join(root, "envs", name)
+	mkdir(t, filepath.Join(env, "conda-meta"))
+	mkdir(t, filepath.Join(env, "lib", "python3.11"))
+	writeFileAt(t, filepath.Join(env, "lib", "python3.11", "os.py"))
+	writeFileAt(t, filepath.Join(env, "conda-meta", ".goomba-incomplete"))
+	return env
+}
+
+func TestRemoveIncompleteEnvironment(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("goomba cannot remove an interrupted prefix without flock")
+	}
+	root := t.TempDir()
+	env := interruptedEnv(t, root, "half")
+	if err := RemoveIncompleteEnvironment("half", root); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(env); !os.IsNotExist(err) {
+		t.Errorf("the interrupted environment is still there (%v)", err)
+	}
+	// Nothing left to remove.
+	if err := RemoveIncompleteEnvironment("half", root); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("again: err = %v, want fs.ErrNotExist", err)
+	}
+	// A finished environment is not removed.
+	fakeCondaEnv(t, root, "done", "3.11.9", "24.0")
+	if err := RemoveIncompleteEnvironment("done", root); err == nil {
+		t.Error("a finished environment was removed")
+	}
+	if _, err := os.Stat(filepath.Join(root, "envs", "done", "bin", "python")); err != nil {
+		t.Errorf("the finished environment was touched: %v", err)
+	}
+	for _, name := range []string{"", "..", "../half", "a/b"} {
+		if err := RemoveIncompleteEnvironment(name, root); err == nil || !strings.Contains(err.Error(), "invalid environment name") {
+			t.Errorf("name %q: err = %v", name, err)
+		}
+	}
+	orig := goombaHostOS
+	goombaHostOS = "windows"
+	defer func() { goombaHostOS = orig }()
+	interruptedEnv(t, root, "win")
+	if err := RemoveIncompleteEnvironment("win", root); !errors.Is(err, ErrBackendUnsupported) {
+		t.Errorf("windows: err = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "envs", "win", "conda-meta", ".goomba-incomplete")); err != nil {
+		t.Errorf("windows: the environment was touched: %v", err)
 	}
 }
