@@ -47,8 +47,9 @@ var (
 	ErrChecksumMismatch = errors.New("checksum mismatch")
 
 	// ErrBackendUnsupported reports an operation that the environment's
-	// backend cannot perform, such as installing a package into an
-	// existing goomba environment with MicromambaInstallPackage.
+	// backend cannot perform: installing a package into an existing
+	// goomba environment with MicromambaInstallPackage, or any goomba
+	// function on Windows.
 	ErrBackendUnsupported = errors.New("operation not supported by the environment's backend")
 )
 
@@ -60,10 +61,25 @@ const defaultGoombaTimeout = 10 * time.Minute
 // installs into a prefix.
 const goombaIncompleteMarker = ".goomba-incomplete"
 
+// goombaHostOS is the operating system the goomba functions check for
+// support; tests replace it.
+var goombaHostOS = runtime.GOOS
+
+// checkGoombaHost refuses the operating systems goomba cannot create
+// environments on yet: on Windows it cannot install the entry-point
+// launchers that pip (which jumpboot always installs) ships.
+func checkGoombaHost() error {
+	if goombaHostOS == "windows" {
+		return fmt.Errorf("%w: goomba cannot create environments on Windows yet (it does not install entry-point launchers such as pip.exe); use CreateEnvironmentMamba", ErrBackendUnsupported)
+	}
+	return nil
+}
+
 // GoombaOptions configures environment creation with goomba, a pure-Go
 // conda resolver and installer that jumpboot calls as a library (no
 // micromamba binary is downloaded or run). The zero value selects the same
-// defaults as CreateEnvironmentMamba.
+// defaults as CreateEnvironmentMamba. The goomba functions run on Linux and
+// macOS; on Windows they fail with ErrBackendUnsupported.
 //
 // goomba reads no environment variables and no configuration files
 // (.condarc, MAMBA_ROOT_PREFIX, HTTPS_PROXY, CONDA_OVERRIDE_*, ...):
@@ -182,8 +198,12 @@ func goombaOptionsFor(pythonVersion, channel string) GoombaOptions {
 // unknown), "Linking packages" (packages) and "Compiling Python files"
 // (files). It is never called concurrently.
 //
+// On Windows it fails with ErrBackendUnsupported before doing anything.
 // It is safe for concurrent use with different environments.
 func CreateEnvironmentGoombaWithOptions(ctx context.Context, envName, rootDir string, opts GoombaOptions, progressCallback ProgressCallback) (*PythonEnvironment, error) {
+	if err := checkGoombaHost(); err != nil {
+		return nil, err
+	}
 	j, err := newGoombaJob(ctx, envName, rootDir, opts, progressCallback)
 	if err != nil {
 		return nil, err
@@ -235,8 +255,12 @@ func CreateEnvironmentGoombaWithOptions(ctx context.Context, envName, rootDir st
 //     FreezeToFile for a goomba environment (conda Packages, legacy
 //     PipPackages) restores completely. Pip checksums are not verified.
 //
-// gopts otherwise applies as for CreateEnvironmentGoombaWithOptions.
+// gopts otherwise applies as for CreateEnvironmentGoombaWithOptions. On
+// Windows it fails with ErrBackendUnsupported before reading filePath.
 func CreateEnvironmentFromJSONFileGoomba(ctx context.Context, filePath, rootDir string, ropts RestoreOptions, gopts GoombaOptions, progressCallback ProgressCallback) (*PythonEnvironment, error) {
+	if err := checkGoombaHost(); err != nil {
+		return nil, err
+	}
 	jsonData, err := os.ReadFile(filePath)
 	if err != nil {
 		return nil, fmt.Errorf("error reading JSON file: %w", err)

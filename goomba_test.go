@@ -673,3 +673,23 @@ func TestGoombaUnsafeCaches(t *testing.T) {
 		}
 	}
 }
+
+func TestGoombaRefusesWindows(t *testing.T) {
+	orig := goombaHostOS
+	goombaHostOS = "windows"
+	t.Cleanup(func() { goombaHostOS = orig })
+	root := filepath.Join(t.TempDir(), "root")
+	ctx := context.Background()
+	_, err1 := CreateEnvironmentGoomba("e", root, "3.11", "", nil)
+	_, err2 := CreateEnvironmentGoombaWithOptions(ctx, "e", root, GoombaOptions{}, nil)
+	// The JSON file does not exist: it must not even be read.
+	_, err3 := CreateEnvironmentFromJSONFileGoomba(ctx, filepath.Join(root, "missing.json"), root, RestoreOptions{}, GoombaOptions{}, nil)
+	for i, err := range []error{err1, err2, err3} {
+		if !errors.Is(err, ErrBackendUnsupported) || !strings.Contains(err.Error(), "Windows") {
+			t.Errorf("call %d: err = %v, want ErrBackendUnsupported", i+1, err)
+		}
+	}
+	if _, err := os.Stat(root); !os.IsNotExist(err) {
+		t.Error("the root directory was created")
+	}
+}
