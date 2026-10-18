@@ -36,19 +36,26 @@ func main() {
 			fmt.Println(message)
 		}
 	}
-	env, err := jumpboot.CreateEnvironmentGoombaWithOptions(ctx, "goombaenv", rootDirectory, jumpboot.GoombaOptions{
+	opts := jumpboot.GoombaOptions{
 		PythonVersion: version,
 		Channels:      []string{"conda-forge"},
 		Timeout:       15 * time.Minute,
-	}, progress)
+	}
+	env, err := jumpboot.CreateEnvironmentGoombaWithOptions(ctx, "goombaenv", rootDirectory, opts, progress)
+	if errors.Is(err, jumpboot.ErrIncompleteEnvironment) {
+		// An earlier run was killed while installing: remove what it left
+		// behind, then create the environment again.
+		fmt.Println("Removing an interrupted installation")
+		if err = jumpboot.RemoveIncompleteEnvironment("goombaenv", rootDirectory); err == nil {
+			env, err = jumpboot.CreateEnvironmentGoombaWithOptions(ctx, "goombaenv", rootDirectory, opts, progress)
+		}
+	}
 	// From here on Ctrl-C has its usual effect again.
 	stop()
 	var unsolvable *solve.Unsolvable
 	switch {
 	case errors.As(err, &unsolvable):
 		log.Fatalf("The packages cannot be installed together:\n%s", unsolvable.Explanation)
-	case errors.Is(err, jumpboot.ErrIncompleteEnvironment):
-		log.Fatalf("%v\nRemove %s and run again.", err, filepath.Join(rootDirectory, "envs", "goombaenv"))
 	case err != nil:
 		log.Fatalf("Failed to create environment: %v", err)
 	}

@@ -62,8 +62,7 @@
 // Python to byte-compile noarch packages; jumpboot then runs python and pip
 // to check the environment. goomba reads no configuration file and no
 // environment variable; everything is set through GoombaOptions, which
-// only matter when an environment is created (an existing one is reused as
-// it is):
+// only matter when an environment is created:
 //   - Defaults: Python 3.10, the conda-forge channel, a 10 minute
 //     timeout (the context passed in applies too).
 //   - Proxies: none, unless GoombaOptions.Client has one (for example a
@@ -95,9 +94,15 @@
 //   - FreezeToFile reads the conda packages from conda-meta and writes both
 //     the legacy lists and Packages with their sha256, so every restore
 //     reads the file completely.
-//   - A failed or cancelled creation is rolled back. After a crash,
-//     conda-meta/.goomba-incomplete remains, and the environment is refused
-//     with ErrIncompleteEnvironment until it is removed.
+//   - Reuse: goomba.CheckComplete decides. A finished environment (made by
+//     either backend) is reused as it is; one another process is installing
+//     or removing is refused with goomba.ErrPrefixLocked, without waiting;
+//     an empty directory is filled, any other directory that is not an
+//     environment refused (goomba.ErrPrefixNotEmpty).
+//   - A failed or cancelled creation is rolled back. One whose process
+//     crashed or was killed is refused with ErrIncompleteEnvironment;
+//     jumpboot never removes it by itself. Call
+//     RemoveIncompleteEnvironment, then create the environment again.
 //
 // goomba's errors are wrapped: errors.As finds *solve.Unsolvable for a
 // request without a solution (its Explanation is safe to print), and

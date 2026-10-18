@@ -169,7 +169,7 @@ env, err := jumpboot.CreateEnvironmentGoombaWithOptions(ctx, "myenv", "./envs", 
 | Configuration | `.condarc`, `MAMBA_*` and `CONDA_OVERRIDE_*` variables, proxies from the environment | No configuration files or environment variables: everything comes from `GoombaOptions` (`VirtualOverrides` replaces `CONDA_OVERRIDE_*`) |
 | Proxies | `HTTPS_PROXY` and friends | Only through `GoombaOptions.Client` |
 | Defaults | Python 3.10 | Python 3.10, conda-forge, 10 minute timeout plus your context |
-| Reuse | An existing `rootDir/envs/NAME` is used as it is | The same; the options (specs, channels, ...) only matter when the environment is created |
+| Reuse | An existing `rootDir/envs/NAME` is used as it is | A finished environment (made by either backend) is used as it is; the options (specs, channels, ...) only matter when one is created. An environment another process is installing or removing is refused with `goomba.ErrPrefixLocked`, an interrupted one with `ErrIncompleteEnvironment`; an empty directory is filled, and any other non-empty directory refused (`goomba.ErrPrefixNotEmpty`) |
 | Channels | Names or URLs | Names or https URLs, strict priority (highest first). Refused: the `defaults` multichannel (list its channels), `file://` and `http://` channels, URLs whose host is an IPv6 literal or whose path is exactly `/t`, and a mirror whose DNS name resolves to a private address (name it by its IPv4 address) |
 | Root directory | Any writable directory | Must not be writable by other users, nor any directory above it (group-writable is fine for your own private group): goomba refuses it with `goomba.ErrUnsafePrefix` or `fetch.ErrUnsafeCache`/`repodata.ErrUnsafeCache` |
 | Caches | `rootDir/pkgs` | `rootDir/goomba/pkgs` and `rootDir/goomba/repodata`, created 0700 |
@@ -177,11 +177,25 @@ env, err := jumpboot.CreateEnvironmentGoombaWithOptions(ctx, "myenv", "./envs", 
 | Install into an existing environment | `MicromambaInstallPackage` | Not supported (`ErrBackendUnsupported`): list the packages in `GoombaOptions.Specs`, or restore from JSON |
 | JSON restore | Creates the base environment, then installs each conda package separately, trying each channel in turn; checks only that checksums are present | Solves python, pip and every conda package together, pinned exactly, on the channels in strict priority in the order listed; verifies the checksums against the channel before installing anything, and with `Strict` refuses any solved package that has no checksum in the file. A failed pip step removes the new environment again |
 | Freeze | `micromamba list` | The environment's `conda-meta` records; the file holds the legacy lists and `Packages` (with sha256), so every restore reads it |
-| Failure | Whatever micromamba leaves behind | Rolls back. After a crash, `conda-meta/.goomba-incomplete` remains and the environment is refused (`ErrIncompleteEnvironment`) until you remove it |
+| Failure | Whatever micromamba leaves behind | Rolls back. After a crash or kill, the unfinished environment is refused with `ErrIncompleteEnvironment`; jumpboot never removes it by itself: call `RemoveIncompleteEnvironment`, then create it again |
 
 Neither freeze records channel priority: `Channels` lists channels in the order the packages name them. Before restoring a file with several channels with goomba, put them highest priority first; when such a restore is unsolvable, the error says so.
 
-goomba's errors are wrapped, so you can branch on them: `errors.As(err, &unsolvable)` with a `*solve.Unsolvable` for a request that has no solution (its `Explanation` is safe to print), and `errors.Is(err, goomba.ErrPrefixLocked)` for a concurrent creation of the same environment. See [examples/goomba](examples/goomba/).
+goomba's errors are wrapped, so you can branch on them: `errors.As(err, &unsolvable)` with a `*solve.Unsolvable` for a request that has no solution (its `Explanation` is safe to print), and `errors.Is(err, goomba.ErrPrefixLocked)` for an environment another process is creating or removing (nothing waits; try again later).
+
+Recovering from an interrupted installation:
+
+```go
+env, err := jumpboot.CreateEnvironmentGoomba("myenv", "./envs", "3.11", "conda-forge", nil)
+if errors.Is(err, jumpboot.ErrIncompleteEnvironment) {
+    // A previous run was killed while installing: remove what it left, then retry.
+    if err = jumpboot.RemoveIncompleteEnvironment("myenv", "./envs"); err == nil {
+        env, err = jumpboot.CreateEnvironmentGoomba("myenv", "./envs", "3.11", "conda-forge", nil)
+    }
+}
+```
+
+`RemoveIncompleteEnvironment` removes only an interrupted environment, under goomba's lock on it: a finished one is left alone, and one another process is working on gives `goomba.ErrPrefixLocked`. See [examples/goomba](examples/goomba/).
 
 ## Examples
 
