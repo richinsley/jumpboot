@@ -31,21 +31,18 @@ type Runtime interface {
 	Freeze(filePath string) error
 }
 
-// Backend says which tool manages a conda environment: the tool the function
-// that returned the environment used to create or reuse it. Environments
-// created by either backend have the same layout and are interchangeable.
+// Backend says which tool created and manages a conda environment. The
+// requested create function is only a preference for a new environment;
+// reuse follows the existing environment's recorded backend.
 type Backend string
 
 const (
 	// BackendNone is the backend of environments no conda tool manages:
 	// the system Python, a given executable, or a virtual environment.
 	BackendNone Backend = ""
-	// BackendMicromamba is the backend of environments returned by
-	// CreateEnvironmentMamba and the JSON restores built on it.
+	// BackendMicromamba identifies environments created by micromamba.
 	BackendMicromamba Backend = "micromamba"
-	// BackendGoomba is the backend of environments returned by
-	// CreateEnvironmentGoomba, CreateEnvironmentGoombaWithOptions and
-	// CreateEnvironmentFromJSONFileGoomba.
+	// BackendGoomba identifies environments created by goomba.
 	BackendGoomba Backend = "goomba"
 )
 
@@ -259,7 +256,7 @@ const (
 //   - progressCallback: Optional callback for progress updates; may be nil
 //
 // The environment is created at rootDir/envs/envName. If the environment already exists,
-// it is reused and IsNew will be false.
+// it is reused by its original backend and IsNew will be false.
 //
 // Returns an error if the architecture is unsupported, the directory is not writable,
 // or the requested Python version cannot be satisfied.
@@ -271,6 +268,19 @@ func CreateEnvironmentMamba(envName string, rootDir string, pythonVersion string
 	requestedVersion, err := ParseVersion(pythonVersion)
 	if err != nil {
 		return nil, fmt.Errorf("error parsing requested python version: %v", err)
+	}
+	if err := checkEnvName(envName); err != nil {
+		return nil, err
+	}
+	// Reuse is selected before probing or downloading micromamba. A shared
+	// root can contain environments from both backends, and its bin directory
+	// says nothing about who created this particular prefix.
+	backend, err := DetectCondaBackend(filepath.Join(rootDir, "envs", envName))
+	if err != nil {
+		return nil, err
+	}
+	if backend == BackendGoomba {
+		return CreateEnvironmentGoomba(envName, rootDir, pythonVersion, channel, progressCallback)
 	}
 
 	binDirectory := filepath.Join(rootDir, "bin")
@@ -379,6 +389,9 @@ func CreateEnvironmentMamba(envName string, rootDir string, pythonVersion string
 
 		if err := createEnvCmd.Wait(); err != nil {
 			return nil, fmt.Errorf("error creating environment: %v", err)
+		}
+		if err := writeBackendMarker(envPath, BackendMicromamba); err != nil {
+			return nil, err
 		}
 
 		if progressCallback != nil {

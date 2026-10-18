@@ -62,7 +62,7 @@ func fakeCondaEnv(t *testing.T, root, name, python, pip string) {
 		t.Fatal(err)
 	}
 	// A history makes it a finished environment for goomba.CheckComplete.
-	if err := os.WriteFile(filepath.Join(env.EnvPath, "conda-meta", "history"), []byte("==> 2026-10-17 00:00:00 <==\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(env.EnvPath, "conda-meta", "history"), []byte("==> 2026-10-17 00:00:00 <==\n# cmd: goomba create -p "+env.EnvPath+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -122,15 +122,18 @@ func TestCondaEnvPathsPerGOOS(t *testing.T) {
 	}
 }
 
-// TestGoombaFillsPathsAsMamba reuses one environment through both backends
-// (offline: a fake micromamba and a fake environment) and compares every
-// field.
+// TestGoombaFillsPathsAsMamba reuses a legacy micromamba environment through
+// both APIs and confirms that the creator, not the called API, wins.
 func TestGoombaFillsPathsAsMamba(t *testing.T) {
 	noMicromambaDownload(t)
 	root := t.TempDir()
 	fakeCondaEnv(t, root, "base-3.11", "3.11.9", "24.0")
 	mm := filepath.Join(root, "bin", "micromamba")
 	writeScript(t, mm, "2.2.0")
+	history := filepath.Join(root, "envs", "base-3.11", "conda-meta", "history")
+	if err := os.WriteFile(history, []byte("==> 2026-10-17 00:00:00 <==\n# cmd: "+mm+" --root-prefix "+root+" create -n base-3.11 python=3.11 -y\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := RunReadStdout(mm, "--version"); err != nil {
 		t.Fatalf("the fake micromamba does not run (%v); not calling CreateEnvironmentMamba", err)
 	}
@@ -143,10 +146,10 @@ func TestGoombaFillsPathsAsMamba(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m.Backend != BackendMicromamba || g.Backend != BackendGoomba {
-		t.Errorf("Backend = %q and %q, want %q and %q", m.Backend, g.Backend, BackendMicromamba, BackendGoomba)
+	if m.Backend != BackendMicromamba || g.Backend != BackendMicromamba {
+		t.Errorf("Backend = %q and %q, want micromamba both times", m.Backend, g.Backend)
 	}
-	if m.MicromambaPath != mm || g.MicromambaPath != "" {
+	if m.MicromambaPath != mm || g.MicromambaPath != mm {
 		t.Errorf("MicromambaPath = %q and %q", m.MicromambaPath, g.MicromambaPath)
 	}
 	if m.IsNew || g.IsNew {
@@ -155,8 +158,6 @@ func TestGoombaFillsPathsAsMamba(t *testing.T) {
 	if g.PythonVersion != (Version{3, 11, 9}) || g.PipVersion != (Version{24, 0, -1}) {
 		t.Errorf("versions = %+v, %+v", g.PythonVersion, g.PipVersion)
 	}
-	// Everything but the backend's own fields is the same.
-	m.Backend, m.MicromambaPath, m.MicromambaVersion = g.Backend, g.MicromambaPath, g.MicromambaVersion
 	if !reflect.DeepEqual(m, g) {
 		t.Errorf("environments differ:\nmicromamba %+v\ngoomba     %+v", m, g)
 	}
@@ -166,6 +167,29 @@ func TestGoombaFillsPathsAsMamba(t *testing.T) {
 	// Reusing creates no goomba caches.
 	if _, err := os.Stat(filepath.Join(root, "goomba")); !os.IsNotExist(err) {
 		t.Errorf("reuse created %s/goomba (%v)", root, err)
+	}
+}
+
+func TestMambaReusesGoombaWithoutMicromamba(t *testing.T) {
+	noMicromambaDownload(t)
+	root := t.TempDir()
+	fakeCondaEnv(t, root, "existing", "3.11.9", "24.0")
+	fromMamba, err := CreateEnvironmentMamba("existing", root, "3.11", "conda-forge", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fromGoomba, err := CreateEnvironmentGoomba("existing", root, "3.11", "conda-forge", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fromMamba.Backend != BackendGoomba || fromGoomba.Backend != BackendGoomba || fromMamba.MicromambaPath != "" || fromMamba.IsNew {
+		t.Fatalf("Mamba call returned %+v; Goomba call returned %+v", fromMamba, fromGoomba)
+	}
+	if !reflect.DeepEqual(fromMamba, fromGoomba) {
+		t.Errorf("environment differs by requested API: %+v vs %+v", fromMamba, fromGoomba)
+	}
+	if _, err := os.Stat(filepath.Join(root, "bin", "micromamba")); !os.IsNotExist(err) {
+		t.Errorf("micromamba unexpectedly present: %v", err)
 	}
 }
 
@@ -718,6 +742,12 @@ func TestGoombaFreezeThroughAllRestores(t *testing.T) {
 			}
 		}
 		writeShell(filepath.Join(root, "bin", "micromamba"), "case \"$*\" in *--version*) echo 2.2.0; exit 0;; esac\necho \"micromamba $*\" >> "+logf+"\n")
+		// The restore destination is a legacy micromamba prefix. The source
+		// freeze above remains Goomba-created; reuse now follows the
+		// destination's creator rather than the requested API.
+		if err := os.WriteFile(filepath.Join(root, "envs", "e", "conda-meta", "history"), []byte("# cmd: "+filepath.Join(root, "bin", "micromamba")+" create -n e python=3.11\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
 		writeShell(filepath.Join(root, "envs", "e", "bin", "pip"), "if [ \"$1\" = --version ]; then echo 'pip 26.0.1 from x (python 3.11)'; exit 0; fi\necho \"pip $*\" >> "+logf+"\n")
 		if out, err := RunReadStdout(filepath.Join(root, "bin", "micromamba"), "--version"); err != nil || strings.TrimSpace(out) != "2.2.0" {
 			t.Fatalf("the fake micromamba does not run (%q, %v)", out, err)

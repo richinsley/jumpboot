@@ -265,6 +265,9 @@ func TestGoombaEndToEndOffline(t *testing.T) {
 	if _, err := os.Lstat(filepath.Join(envPath, "conda-meta", ".goomba-incomplete")); !os.IsNotExist(err) {
 		t.Errorf("incomplete marker left: %v", err)
 	}
+	if got, err := DetectCondaBackend(envPath); err != nil || got != BackendGoomba {
+		t.Errorf("committed backend marker: backend %q, err %v", got, err)
+	}
 	for _, d := range []string{"pkgs", "repodata"} {
 		fi, err := os.Stat(filepath.Join(root, "goomba", d))
 		if err != nil || fi.Mode().Perm() != 0o700 {
