@@ -56,8 +56,8 @@ var (
 
 	// ErrBackendUnsupported reports an operation that the environment's
 	// backend cannot perform: installing a package into an existing
-	// goomba environment with MicromambaInstallPackage, or any goomba
-	// function on Windows.
+	// goomba environment with MicromambaInstallPackage, or creating a new
+	// goomba environment on Windows.
 	ErrBackendUnsupported = errors.New("operation not supported by the environment's backend")
 )
 
@@ -83,7 +83,8 @@ func checkGoombaHost() error {
 // conda resolver and installer that jumpboot calls as a library: no
 // micromamba binary is downloaded or run. The zero value selects the same
 // defaults as CreateEnvironmentMamba. The goomba functions run on Linux and
-// macOS; on Windows they fail with ErrBackendUnsupported.
+// macOS; on Windows new goomba environments fail with ErrBackendUnsupported.
+// Reusing an existing micromamba environment follows the micromamba path.
 //
 // goomba reads no environment variables and no configuration files
 // (.condarc, MAMBA_ROOT_PREFIX, HTTPS_PROXY, CONDA_OVERRIDE_*, ...):
@@ -205,11 +206,12 @@ func goombaOptionsFor(pythonVersion, channel string) GoombaOptions {
 // micromamba's rootDir/pkgs; goomba refuses cache directories that other
 // users could change. On any error goomba removes what it installed.
 //
-// What happens to an existing rootDir/envs/envName depends on what
-// goomba.CheckComplete finds there:
-//   - a finished environment, whichever backend made it, is reused as it
-//     is, as CreateEnvironmentMamba does (opts.Specs, Channels and the like
-//     are then ignored);
+// What happens to an existing rootDir/envs/envName depends on its creator.
+// A micromamba prefix is delegated to CreateEnvironmentMamba (whose probes
+// are not bounded by ctx or Timeout). For a goomba prefix,
+// goomba.CheckComplete determines whether it can be reused:
+//   - a finished environment is reused as it is (opts.Specs, Channels and
+//     the like are then ignored);
 //   - one that another process is installing or removing is an error
 //     wrapping goomba.ErrPrefixLocked (nothing is waited for);
 //   - one whose goomba installation was interrupted is an
@@ -223,12 +225,13 @@ func goombaOptionsFor(pythonVersion, channel string) GoombaOptions {
 //     other users can write: the goomba backend reuses only the current
 //     user's own environments, where micromamba reuses any it can run.
 //
-// Either way, the Python and pip versions are checked as
-// CreateEnvironmentMamba checks them. For a new environment the check runs
+// Unknown or conflicting creator evidence is refused. Either way, the
+// Python and pip versions are checked. For a new environment the check runs
 // inside goomba's transaction (InstallOptions.BeforeCommit), on the
 // interpreter at the path goomba resolved: if it fails, the installation
-// is rolled back and nothing is left. The environment's Backend is
-// BackendGoomba and its MicromambaPath is empty.
+// is rolled back and nothing is left. A goomba environment's Backend is
+// BackendGoomba and its MicromambaPath is empty; micromamba reuse reports
+// BackendMicromamba and the actual executable path.
 //
 // progressCallback, if not nil, receives the progress: "Loading channel
 // index" (channels), "Solving environment", "Fetching packages" (bytes,
@@ -239,9 +242,37 @@ func goombaOptionsFor(pythonVersion, channel string) GoombaOptions {
 // return quickly, because the installation waits for it (and the timeout
 // keeps running).
 //
-// On Windows it fails with ErrBackendUnsupported before doing anything.
+// On Windows, new goomba creation fails with ErrBackendUnsupported before
+// doing anything. An existing micromamba prefix is reused through mamba.
 // It is safe for concurrent use with different environments.
 func CreateEnvironmentGoombaWithOptions(ctx context.Context, envName, rootDir string, opts GoombaOptions, progressCallback ProgressCallback) (*PythonEnvironment, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := checkEnvName(envName); err != nil {
+		return nil, err
+	}
+	backend, err := DetectCondaBackend(filepath.Join(rootDir, "envs", envName))
+	if err != nil {
+		// Keep Goomba's established typed errors for non-environments,
+		// incomplete installs, busy prefixes and unsafe ownership. A
+		// complete prefix with ambiguous provenance still fails closed.
+		exists, statusErr := environmentStatus(filepath.Join(rootDir, "envs", envName))
+		if statusErr != nil {
+			return nil, statusErr
+		}
+		if exists {
+			return nil, err
+		}
+		// Not a complete environment. Let ValidateInstall distinguish a
+		// safe empty prefix from a non-empty one and preserve its typed
+		// ErrPrefixNotEmpty result. It runs before any network access.
+	}
+	if backend == BackendMicromamba {
+		// The creation preference does not change ownership of an existing
+		// prefix. Mamba reuse keeps its original checks and package path.
+		return CreateEnvironmentMamba(envName, rootDir, opts.withDefaults().PythonVersion, "", progressCallback)
+	}
 	if err := checkGoombaHost(); err != nil {
 		return nil, err
 	}
@@ -713,11 +744,18 @@ func (j *goombaJob) lockAndInstall(ctx context.Context, specs []string, verify f
 		}
 	}
 	inst := goomba.InstallOptions{
-		PkgsDir:      pkgsDir,
-		Client:       j.opts.Client,
-		CompilePyc:   !j.opts.NoPyc,
-		Progress:     j.progress.installEvent,
-		BeforeCommit: beforeCommit,
+		PkgsDir:    pkgsDir,
+		Client:     j.opts.Client,
+		CompilePyc: !j.opts.NoPyc,
+		Progress:   j.progress.installEvent,
+		BeforeCommit: func(ctx context.Context, prefix string) error {
+			if beforeCommit != nil {
+				if err := beforeCommit(ctx, prefix); err != nil {
+					return err
+				}
+			}
+			return writeBackendMarker(prefix, BackendGoomba)
+		},
 	}
 	lo := goomba.LockOptions{
 		Specs:        specs,
