@@ -133,7 +133,7 @@ queue.RegisterHandler("log", func(data interface{}, id string) (interface{}, err
 
 ## How It Works
 
-1. **First run**: Downloads [micromamba](https://mamba.readthedocs.io/en/latest/) (~5MB), creates a conda environment with your specified Python version, installs packages via pip/conda
+1. **First run**: Downloads [micromamba](https://mamba.readthedocs.io/en/latest/) (~5MB), creates a conda environment with your specified Python version, installs packages via pip/conda (or, with the goomba backend, creates the conda environment without downloading or running micromamba; see [Choosing a backend](#choosing-a-backend))
 2. **Subsequent runs**: Environment exists, startup is fast
 3. **Communication**: Go spawns Python subprocess, communicates via pipes (MessagePack serialization)
 4. **Embedded code**: Python source is base64-encoded in the Go binary, loaded via custom import hooks
@@ -142,11 +142,48 @@ No CGO required for basic operation. Optional shared memory features use CGO on 
 
 **Building without CGO:** When you build with `CGO_ENABLED=0`, shared memory functions (`CreateSharedMemory`, `OpenSharedMemory`) will return `ErrSharedMemoryNotAvailable`. All other features work normally.
 
+## Choosing a backend
+
+Conda environments come from one of two backends. You choose one by the function you call; `env.Backend` tells which one an environment came from. Both create `rootDir/envs/NAME` and fill every path of `PythonEnvironment` the same way, so an environment created by one backend is reused by the other.
+
+```go
+// micromamba: downloads the micromamba binary on first use and runs it
+env, err := jumpboot.CreateEnvironmentMamba("myenv", "./envs", "3.11", "conda-forge", nil)
+
+// goomba: a pure-Go conda resolver and installer, compiled into your program
+env, err := jumpboot.CreateEnvironmentGoomba("myenv", "./envs", "3.11", "conda-forge", nil)
+
+// goomba with a context and options
+env, err := jumpboot.CreateEnvironmentGoombaWithOptions(ctx, "myenv", "./envs", jumpboot.GoombaOptions{
+    PythonVersion: "3.11",
+    Specs:         []string{"numpy>=1.26"},
+    Client:        &http.Client{Transport: &http.Transport{Proxy: http.ProxyFromEnvironment}},
+}, nil)
+```
+
+| | micromamba | goomba |
+|---|---|---|
+| Functions | `CreateEnvironmentMamba`, `CreateEnvironmentFromJSONFile[WithOptions]` | `CreateEnvironmentGoomba`, `CreateEnvironmentGoombaWithOptions`, `CreateEnvironmentFromJSONFileGoomba` |
+| Needs | A download of micromamba from GitHub into `rootDir/bin` on first use | Nothing beyond your program; the only process it runs is the new environment's Python, to byte-compile packages |
+| Configuration | `.condarc`, `MAMBA_*` and `CONDA_OVERRIDE_*` variables, proxies from the environment | No configuration files or environment variables: everything comes from `GoombaOptions` (`VirtualOverrides` replaces `CONDA_OVERRIDE_*`) |
+| Proxies | `HTTPS_PROXY` and friends | Only through `GoombaOptions.Client` |
+| Defaults | Python 3.10 | Python 3.10, conda-forge, 10 minute timeout plus your context |
+| Channels | Names or URLs | Names or https URLs, strict priority. A mirror whose DNS name resolves to a private address is refused: name it by its IP address |
+| Caches | `rootDir/pkgs` | `rootDir/goomba/pkgs` and `rootDir/goomba/repodata`, created 0700; directories other users could write are refused |
+| pip | Added to python by micromamba | Added by jumpboot as a `pip` spec unless a spec names pip |
+| Install into an existing environment | `MicromambaInstallPackage` | Not supported (`ErrBackendUnsupported`): list the packages in `GoombaOptions.Specs`, or restore from JSON |
+| JSON restore | Creates the base environment, then installs each conda package separately, trying each channel in turn; checks only that checksums are present | Solves python, pip and every conda package together, pinned exactly, on the channels in strict priority; verifies the checksums against the channel before installing anything |
+| Freeze | `micromamba list` | The environment's `conda-meta` records, with sha256 |
+| Failure | Whatever micromamba leaves behind | Rolls back. After a crash, `conda-meta/.goomba-incomplete` remains and the environment is refused (`ErrIncompleteEnvironment`) until you remove it |
+
+goomba's errors are wrapped, so you can branch on them: `errors.As(err, &unsolvable)` with a `*solve.Unsolvable` for a request that has no solution (its `Explanation` is safe to print), and `errors.Is(err, goomba.ErrPrefixLocked)` for a concurrent creation of the same environment. See [examples/goomba](examples/goomba/).
+
 ## Examples
 
 | Example | What it demonstrates |
 |---------|---------------------|
 | [repl](examples/repl/) | Interactive Python from Go |
+| [goomba](examples/goomba/) | The REPL example on an environment created with goomba |
 | [jsonqueueserver](examples/jsonqueueserver/) | Bidirectional RPC with MessagePack |
 | [chromadb](examples/chromadb/) | Vector database for embeddings |
 | [gradio](examples/gradio/) | Python web UI from Go |
@@ -181,7 +218,7 @@ No CGO required for basic operation. Optional shared memory features use CGO on 
 
 ## Acknowledgments
 
-Jumpboot uses [micromamba](https://mamba.readthedocs.io/en/latest/) for fast, reliable conda environment management. Micromamba is a lightweight, standalone C++ implementation of the conda package manager developed by the [mamba](https://github.com/mamba-org/mamba) team.
+Jumpboot uses [micromamba](https://mamba.readthedocs.io/en/latest/) for fast, reliable conda environment management. Micromamba is a lightweight, standalone C++ implementation of the conda package manager developed by the [mamba](https://github.com/mamba-org/mamba) team. The alternative backend, [goomba](https://github.com/richinsley/goomba), is a pure-Go conda resolver and installer.
 
 ## License
 

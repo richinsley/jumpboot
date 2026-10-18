@@ -25,6 +25,9 @@
 //	// Create a new environment using micromamba (auto-downloads if needed)
 //	env, err := jumpboot.CreateEnvironmentMamba("myenv", "/path/to/root", "3.10", "conda-forge", nil)
 //
+//	// The same environment with goomba, a pure-Go installer (no download)
+//	env, err := jumpboot.CreateEnvironmentGoomba("myenv", "/path/to/root", "3.10", "conda-forge", nil)
+//
 //	// Use the system Python installation
 //	env, err := jumpboot.CreateEnvironmentFromSystem()
 //
@@ -33,6 +36,59 @@
 //
 //	// Restore an environment from a frozen JSON specification
 //	env, err := jumpboot.CreateEnvironmentFromJSONFile("env.json", "/path/to/root", nil)
+//
+// # Choosing a Backend
+//
+// Conda environments come from one of two backends, chosen by the function
+// called; PythonEnvironment.Backend says which one an environment came from.
+// Both create rootDir/envs/NAME and fill every path field the same way, so an
+// environment made by one backend is reused by the other.
+//
+// micromamba (CreateEnvironmentMamba, CreateEnvironmentFromJSONFile,
+// CreateEnvironmentFromJSONFileWithOptions) downloads the micromamba binary
+// from GitHub into rootDir/bin on first use and runs it, with the process
+// environment: .condarc files, MAMBA_* and CONDA_OVERRIDE_* variables and
+// proxy settings apply. Its package cache is rootDir/pkgs. It adds pip to
+// python by default, and MicromambaInstallPackage installs into an
+// existing environment.
+//
+// goomba (CreateEnvironmentGoomba, CreateEnvironmentGoombaWithOptions,
+// CreateEnvironmentFromJSONFileGoomba) is a pure-Go conda resolver and
+// installer compiled into the program: nothing is downloaded or run except
+// the new environment's Python, which byte-compiles noarch packages. It
+// reads no configuration file and no environment variable; everything is
+// set through GoombaOptions:
+//   - Defaults: Python 3.10, the conda-forge channel, a 10 minute
+//     timeout (the context passed in applies too).
+//   - Proxies: none, unless GoombaOptions.Client has one (for example a
+//     transport with Proxy: http.ProxyFromEnvironment).
+//   - Channels are names or https URLs with strict priority; a channel on
+//     a public host name that resolves to a private address is refused,
+//     so name a local mirror by its address.
+//   - Caches: rootDir/goomba/pkgs and rootDir/goomba/repodata, created
+//     0700; goomba refuses cache directories that other users could change
+//     (fetch.ErrUnsafeCache, repodata.ErrUnsafeCache).
+//   - pip: goomba does not add pip to python, so jumpboot adds a pip spec
+//     unless one is given.
+//   - No installs into an existing environment: MicromambaInstallPackage
+//     fails with ErrBackendUnsupported; create the environment with the
+//     packages in GoombaOptions.Specs, or restore it from JSON.
+//   - JSON restore solves python, pip and all conda packages of the
+//     specification together, pinned exactly, on the channels in strict
+//     priority (the micromamba restore installs them one by one, trying
+//     each channel in turn), and verifies their checksums against the
+//     channel before installing anything (the micromamba restore only
+//     checks that they are present).
+//   - FreezeToFile reads the conda packages from conda-meta and records
+//     their sha256.
+//   - A failed or cancelled creation is rolled back. After a crash,
+//     conda-meta/.goomba-incomplete remains, and the environment is refused
+//     with ErrIncompleteEnvironment until it is removed.
+//
+// goomba's errors are wrapped: errors.As finds *solve.Unsolvable for a
+// request without a solution (its Explanation is safe to print), and
+// errors.Is finds goomba.ErrPrefixLocked for a concurrent creation of the
+// same environment.
 //
 // # Process Types
 //

@@ -77,6 +77,9 @@ func main() {
    * `progressCallback`: An optional function to receive progress updates. See the API documentation for details.
 * `MicromambaInstallPackage(packageToInstall, channel)`: Installs a package using micromamba.
 
+#### The goomba backend
+`CreateEnvironmentGoomba` takes the same arguments as `CreateEnvironmentMamba` and creates the same environment without downloading or running micromamba: goomba, a pure-Go conda resolver and installer, does the work inside your program. `CreateEnvironmentGoombaWithOptions` adds a context and `GoombaOptions` (extra specs such as `numpy`, channels, an HTTP client for proxies, a timeout), and `CreateEnvironmentFromJSONFileGoomba` restores a frozen specification in one solve with verified checksums. goomba cannot install into an existing environment, so put conda packages in `GoombaOptions.Specs` instead of calling `MicromambaInstallPackage`. See [Choosing a backend](../README.md#choosing-a-backend) for the differences.
+
 ### 2. Creating a `venv` Environment
 ```go
 package main
