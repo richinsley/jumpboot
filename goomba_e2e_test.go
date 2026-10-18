@@ -442,6 +442,22 @@ func TestGoombaEndToEndOffline(t *testing.T) {
 	}
 
 	testChannelOrderHint(t, ctx, ch, python311)
+
+	// The callback is not called once the Timeout has expired: one slow
+	// call outlives it, and no other follows (the caches are warm, so
+	// goomba still has many events to report).
+	slow := opts
+	slow.Timeout = 300 * time.Millisecond
+	calls := 0
+	_, err = CreateEnvironmentGoombaWithOptions(ctx, "slow", root, slow, func(msg string, current, total int64) {
+		if msg == "Fetching packages" {
+			calls++
+			time.Sleep(400 * time.Millisecond)
+		}
+	})
+	if !errors.Is(err, context.DeadlineExceeded) || calls != 1 {
+		t.Errorf("slow callback: %d calls, err = %v; want 1 call and the deadline", calls, err)
+	}
 }
 
 // testChannelOrderHint restores a specification whose two channels are

@@ -487,6 +487,7 @@ func TestVerifyRestore(t *testing.T) {
 		{"everything listed", []PackageSpec{numpy, python, zlib}, strict, false, ""},
 		{"hex case", []PackageSpec{pkg("numpy", "1.26.0", "py311_0", strings.ToUpper(sum('a')))}, verify, false, ""},
 		{"name case", []PackageSpec{pkg("NumPy", "1.26.0", "py311_0", sum('a'))}, verify, false, ""},
+		{"name case mismatch", []PackageSpec{pkg("NumPy", "1.26.0", "py311_0", sum('c'))}, verify, true, "checksum mismatch"},
 		{"no build pinned", []PackageSpec{pkg("numpy", "1.26.0", "", sum('a'))}, verify, false, ""},
 		{"mismatch", []PackageSpec{pkg("numpy", "1.26.0", "py311_0", sum('c'))}, verify, true, "checksum mismatch"},
 		{"mismatch strict", []PackageSpec{zlib, numpy, pkg("python", "3.11.15", "h_0", sum('a'))}, strict, true, "checksum mismatch"},
