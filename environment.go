@@ -831,20 +831,30 @@ func CreateVenvEnvironment(baseEnv *PythonEnvironment, venvPath string, options 
 //
 // For a goomba environment (Backend BackendGoomba), the conda packages are
 // read from the environment's conda-meta records instead of running
-// micromamba, and the file holds both forms of the specification, so that
-// every restore reads it completely:
-//   - the legacy CondaPackages ("name=version=build") and Channels, filled
-//     as for a micromamba environment (packages pip freeze also lists are
-//     left out), which CreateEnvironmentFromJSONFile reads;
+// micromamba, and the file holds both forms of the specification:
+//   - the legacy CondaPackages ("name=version=build"), filled as for a
+//     micromamba environment (packages pip freeze also lists are left out);
+//   - Channels: the channel of every conda package;
+//   - PipPackages: pip freeze's lines, as always;
 //   - Packages: every conda package (Source "conda", with version, build
 //     and its sha256 when the record has one) and every pip package of the
-//     form name==version (Source "pip"), which
-//     CreateEnvironmentFromJSONFileWithOptions and
-//     CreateEnvironmentFromJSONFileGoomba read.
+//     form name==version (Source "pip").
+//
+// What each restore reads of it:
+//   - CreateEnvironmentFromJSONFile: CondaPackages and PipPackages, so the
+//     conda packages pip also lists come from pip;
+//   - CreateEnvironmentFromJSONFileWithOptions: Packages only, so it drops
+//     the pip lines that are not name==version (VCS, URL and local
+//     installs, editable ones, ===); its Strict mode refuses the file as
+//     soon as it lists a pip package, which has no checksum;
+//   - CreateEnvironmentFromJSONFileGoomba: Packages, then the PipPackages
+//     lines Packages does not name, so it reads everything; its Strict mode
+//     verifies the conda packages and exempts the pip ones.
 //
 // With either backend, Channels lists the channels in the order the
 // packages name them, not in priority order. An environment whose goomba
-// installation did not finish is refused (ErrIncompleteEnvironment).
+// installation did not finish, or that another process is installing or
+// removing, is refused (ErrIncompleteEnvironment, goomba.ErrPrefixLocked).
 //
 // File URLs in pip freeze output are cleaned to show only package names.
 func (env *PythonEnvironment) FreezeToFile(filePath string) error {
