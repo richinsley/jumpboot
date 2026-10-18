@@ -11,6 +11,8 @@ import (
 	"reflect"
 	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -395,9 +397,46 @@ func TestCondaPinSpecIsExact(t *testing.T) {
 			t.Errorf("condaPinSpec(%q) = %q, want an error", p, s)
 		}
 	}
+
+	// The parse-back proof decides on its own. condaPinSpec's character
+	// check refuses everything above first, so checkExactPin is also given
+	// specs that parse but are not an exact pin of the package asked for.
+	for _, tc := range []struct {
+		s, name, version, build string
+		exact                   bool
+	}{
+		{"numpy==1.26=b_0", "numpy", "1.26", "b_0", true},
+		{"numpy==1.26", "numpy", "1.26", "", true},
+		{"NumPy==1.26=b_0", "NumPy", "1.26", "b_0", true},
+		{"numpy=1.26=b_0", "numpy", "1.26", "b_0", false}, // conda's prefix match
+		{"numpy=1.26", "numpy", "1.26", "", false},
+		{"numpy>=1.26=b_0", "numpy", "1.26", "b_0", false},
+		{"numpy==1.27=b_0", "numpy", "1.26", "b_0", false},
+		{"numpy==1.26", "numpy", "1.26", "b_0", false},     // no build
+		{"numpy==1.26=b_0", "numpy", "1.26", "", false},    // a build nobody asked for
+		{"numpy==1.26=b_*", "numpy", "1.26", "b_*", false}, // a glob
+		{"numpy==1.26=b_0", "numpy", "1.26", "b_1", false},
+		{"scipy==1.26=b_0", "numpy", "1.26", "b_0", false},
+		{"nump*==1.26=b_0", "nump*", "1.26", "b_0", false},
+		{"conda-forge::numpy==1.26=b_0", "numpy", "1.26", "b_0", false},
+		{"conda-forge/linux-64::numpy==1.26=b_0", "numpy", "1.26", "b_0", false},
+		{"numpy==1.26=b_0[build_number=3]", "numpy", "1.26", "b_0", false},
+		{"numpy==1.26=b_0[md5=" + strings.Repeat("a", 32) + "]", "numpy", "1.26", "b_0", false},
+		{"numpy==1.26=b_0[license=MIT]", "numpy", "1.26", "b_0", false},
+	} {
+		err := checkExactPin(tc.s, tc.name, tc.version, tc.build)
+		switch {
+		case tc.exact && err != nil:
+			t.Errorf("checkExactPin(%q) = %v, want an exact pin", tc.s, err)
+		case !tc.exact && (err == nil || !strings.Contains(err.Error(), "does not pin it exactly")):
+			t.Errorf("checkExactPin(%q, %q, %q, %q) = %v, want \"does not pin it exactly\"", tc.s, tc.name, tc.version, tc.build, err)
+		}
+	}
 }
 
 func TestRestoreCondaSpecs(t *testing.T) {
+	// With Packages, only Packages: legacy CondaPackages are ignored, as
+	// CreateEnvironmentFromJSONFileWithOptions ignores them.
 	es := &EnvironmentSpec{
 		Packages: []PackageSpec{
 			{Name: "numpy", Version: "1.26.4", Build: "py311h64a7726_0", Source: "conda"},
@@ -411,9 +450,13 @@ func TestRestoreCondaSpecs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"numpy==1.26.4=py311h64a7726_0", "packaging==26.0", "scipy=1.11.4=py311h64a7726_0"}
-	if !reflect.DeepEqual(got, want) {
+	if want := []string{"numpy==1.26.4=py311h64a7726_0", "packaging==26.0"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("specs = %q, want %q", got, want)
+	}
+	// Without Packages, the legacy CondaPackages pass through as given.
+	legacy := &EnvironmentSpec{CondaPackages: []string{"scipy=1.11.4=py311h64a7726_0", "zlib"}}
+	if got, err := restoreCondaSpecs(legacy); err != nil || !reflect.DeepEqual(got, legacy.CondaPackages) {
+		t.Errorf("legacy specs = %q, %v", got, err)
 	}
 	es.Packages = append(es.Packages, PackageSpec{Name: "evil", Version: ">=0", Source: "conda"})
 	if _, err := restoreCondaSpecs(es); err == nil {
@@ -421,40 +464,66 @@ func TestRestoreCondaSpecs(t *testing.T) {
 	}
 }
 
-func TestVerifyRestoreChecksums(t *testing.T) {
+func TestVerifyRestore(t *testing.T) {
 	sum := func(c byte) string { return strings.Repeat(string(c), 64) }
 	lf := &lock.Lockfile{Packages: []lock.Package{
-		{Name: "numpy", Version: "1.26.4", Build: "py311_0", SHA256: sum('a')},
+		{Name: "libzlib", Version: "1.3.1", Build: "h_2", SHA256: sum('d')},
+		{Name: "numpy", Version: "1.26.0", Build: "py311_0", SHA256: sum('a')},
 		{Name: "python", Version: "3.11.15", Build: "h_0", SHA256: sum('b')},
 	}}
-	conda := func(name, sha string) PackageSpec {
-		return PackageSpec{Name: name, Version: "1", Source: "conda", SHA256: sha}
+	pkg := func(name, version, build, sha string) PackageSpec {
+		return PackageSpec{Name: name, Version: version, Build: build, Source: "conda", SHA256: sha}
 	}
+	numpy, python, zlib := pkg("numpy", "1.26.0", "py311_0", sum('a')), pkg("python", "3.11.15", "h_0", sum('b')), pkg("libzlib", "1.3.1", "h_2", sum('d'))
 	verify := RestoreOptions{VerifyChecksums: true}
 	strict := RestoreOptions{VerifyChecksums: true, Strict: true}
 	for _, tc := range []struct {
 		name     string
 		pkgs     []PackageSpec
 		opts     RestoreOptions
-		mismatch bool // the error wraps ErrChecksumMismatch
-		fail     bool
+		mismatch bool   // the error wraps ErrChecksumMismatch
+		fail     string // a part of the error, or "" for none
 	}{
-		{"all match", []PackageSpec{conda("numpy", sum('a')), conda("python", sum('b'))}, strict, false, false},
-		{"hex case", []PackageSpec{conda("numpy", strings.ToUpper(sum('a')))}, strict, false, false},
-		{"name case", []PackageSpec{conda("NumPy", sum('a'))}, strict, false, false},
-		{"mismatch", []PackageSpec{conda("numpy", sum('c'))}, verify, true, true},
-		{"mismatch strict", []PackageSpec{conda("python", sum('a'))}, strict, true, true},
-		{"not verifying", []PackageSpec{conda("numpy", sum('c'))}, RestoreOptions{}, false, false},
-		{"strict without verify", []PackageSpec{conda("numpy", sum('c'))}, RestoreOptions{Strict: true}, false, false},
-		{"no checksum", []PackageSpec{conda("numpy", "")}, verify, false, false},
-		{"not solved", []PackageSpec{conda("scipy", sum('a'))}, verify, false, false},
-		{"not solved strict", []PackageSpec{conda("scipy", sum('a'))}, strict, false, true},
-		{"pip ignored", []PackageSpec{{Name: "numpy", Version: "1", Source: "pip", SHA256: sum('c')}}, strict, false, false},
+		{"everything listed", []PackageSpec{numpy, python, zlib}, strict, false, ""},
+		{"hex case", []PackageSpec{pkg("numpy", "1.26.0", "py311_0", strings.ToUpper(sum('a')))}, verify, false, ""},
+		{"name case", []PackageSpec{pkg("NumPy", "1.26.0", "py311_0", sum('a'))}, verify, false, ""},
+		{"no build pinned", []PackageSpec{pkg("numpy", "1.26.0", "", sum('a'))}, verify, false, ""},
+		{"mismatch", []PackageSpec{pkg("numpy", "1.26.0", "py311_0", sum('c'))}, verify, true, "checksum mismatch"},
+		{"mismatch strict", []PackageSpec{zlib, numpy, pkg("python", "3.11.15", "h_0", sum('a'))}, strict, true, "checksum mismatch"},
+		{"not verifying", []PackageSpec{pkg("numpy", "1.26.0", "py311_0", sum('c'))}, RestoreOptions{}, false, ""},
+		{"strict without verify", []PackageSpec{pkg("numpy", "1.26.0", "py311_0", sum('c'))}, RestoreOptions{Strict: true}, false, ""},
+		{"no checksum", []PackageSpec{pkg("numpy", "1.26.0", "py311_0", "")}, verify, false, ""},
+		{"not solved", []PackageSpec{pkg("scipy", "1", "0", sum('a'))}, verify, false, ""},
+		{"not solved strict", []PackageSpec{numpy, python, zlib, pkg("scipy", "1", "0", sum('a'))}, strict, false, `conda package "scipy" is not in the solution`},
+		{"pip ignored", []PackageSpec{numpy, python, zlib, {Name: "numpy", Version: "1", Source: "pip", SHA256: sum('c')}}, strict, false, ""},
+		// Versions and builds compare as strings, whatever the options:
+		// conda's version equality pads zeros and ignores case.
+		{"padded version", []PackageSpec{pkg("numpy", "1.26", "py311_0", "")}, RestoreOptions{}, false, `pins version "1.26"`},
+		{"other build", []PackageSpec{pkg("python", "3.11.15", "h_1", "")}, RestoreOptions{}, false, `build "h_1"`},
+		// Strict: every solved package must be listed with a checksum.
+		{"unlisted dependency", []PackageSpec{numpy, python}, strict, false, "libzlib-1.3.1-h_2 is in the solution"},
+		{"listed without checksum", []PackageSpec{numpy, python, pkg("libzlib", "1.3.1", "h_2", "")}, strict, false, "libzlib-1.3.1-h_2 is in the solution"},
+		{"no packages", nil, strict, false, "libzlib-1.3.1-h_2 is in the solution"},
 	} {
-		err := verifyRestoreChecksums(&EnvironmentSpec{Packages: tc.pkgs}, lf, tc.opts)
-		if (err != nil) != tc.fail || errors.Is(err, ErrChecksumMismatch) != tc.mismatch {
-			t.Errorf("%s: err = %v", tc.name, err)
+		err := verifyRestore(&EnvironmentSpec{Packages: tc.pkgs}, lf, tc.opts)
+		if (err != nil) != (tc.fail != "") || (err != nil && !strings.Contains(err.Error(), tc.fail)) || errors.Is(err, ErrChecksumMismatch) != tc.mismatch {
+			t.Errorf("%s: err = %v, want %q", tc.name, err, tc.fail)
 		}
+	}
+	// The case that made Strict meaningful: an unchecked legacy package.
+	es := &EnvironmentSpec{
+		Packages:      []PackageSpec{pkg("python", "3.11.9", "h_0", sum('a'))},
+		CondaPackages: []string{"evilpkg"},
+	}
+	if specs, _ := restoreCondaSpecs(es); !reflect.DeepEqual(specs, []string{"python==3.11.9=h_0"}) {
+		t.Errorf("legacy CondaPackages reach the solve beside Packages: %q", specs)
+	}
+	evil := &lock.Lockfile{Packages: []lock.Package{
+		{Name: "evilpkg", Version: "6.6.6", Build: "0", SHA256: sum('e')},
+		{Name: "python", Version: "3.11.9", Build: "h_0", SHA256: sum('a')},
+	}}
+	if err := verifyRestore(es, evil, strict); err == nil || !strings.Contains(err.Error(), "evilpkg-6.6.6-0") {
+		t.Errorf("strict accepted an unverified package: %v", err)
 	}
 }
 
@@ -491,34 +560,66 @@ func readSpec(t *testing.T, path string) EnvironmentSpec {
 	return es
 }
 
-func TestFreezeGoombaCondaMeta(t *testing.T) {
-	root := t.TempDir()
-	fakeCondaEnv(t, root, "base-3.11", "3.11.15", "26.0.1")
-	envPath := filepath.Join(root, "envs", "base-3.11")
-	pySum, pipSum := strings.Repeat("ab", 32), strings.Repeat("cd", 32)
-	for _, r := range []map[string]any{
-		{
-			"name": "python", "version": "3.11.15", "build": "hd63d673_0_cpython", "build_number": 0,
-			"subdir": "linux-64", "sha256": pySum, "depends": []string{"libzlib >=1.3.1,<2.0a0"},
-			"url":            "https://conda.anaconda.org/conda-forge/linux-64/python-3.11.15-hd63d673_0_cpython.conda",
-			"requested_spec": "python=3.11", "files": []string{"bin/python3.11"},
-		},
-		{
-			"name": "pip", "version": "26.0.1", "build": "pyh8b19718_0", "build_number": 0,
-			"subdir": "noarch", "noarch": "python", "sha256": pipSum,
-			"url": "https://conda.anaconda.org/conda-forge/noarch/pip-26.0.1-pyh8b19718_0.conda",
-		},
-	} {
+// fakeGoombaFreezeEnv lays out a fake environment root/envs/name with
+// conda-meta records and a pip that answers freeze with pipFreeze.
+func fakeGoombaFreezeEnv(t *testing.T, root, name string, recs []map[string]any, pipFreeze ...string) string {
+	t.Helper()
+	fakeCondaEnv(t, root, name, "3.11.15", "26.0.1")
+	envPath := filepath.Join(root, "envs", name)
+	for _, r := range recs {
 		writeJSON(t, filepath.Join(envPath, "conda-meta", r["name"].(string)+"-"+r["version"].(string)+"-"+r["build"].(string)+".json"), r)
 	}
-	// pip freeze lists a pip package and, as for conda-forge builds, a conda
-	// package by file URL; neither removes a conda package.
 	pipScript := "#!/bin/sh\n" +
 		"if [ \"$1\" = --version ]; then echo 'pip 26.0.1 from x (python 3.11)'; exit 0; fi\n" +
-		"printf '%s\\n' 'requests==2.31.0' 'pip @ file:///home/conda/feedstock_root/build_artifacts/pip_1/work'\n"
-	if err := os.WriteFile(filepath.Join(envPath, "bin", "pip"), []byte(pipScript), 0o755); err != nil {
+		"printf '%s\\n'"
+	for _, l := range pipFreeze {
+		pipScript += " '" + l + "'"
+	}
+	if err := os.WriteFile(filepath.Join(envPath, "bin", "pip"), []byte(pipScript+"\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	return envPath
+}
+
+// condaMetaRecord returns a conda-meta record of a package from a channel
+// URL, with the given sha256.
+func condaMetaRecord(channel, subdir, name, version, build, sha string) map[string]any {
+	return map[string]any{
+		"name": name, "version": version, "build": build, "build_number": 0, "subdir": subdir,
+		"sha256": sha, "depends": []string{}, "files": []string{},
+		"fn": name + "-" + version + "-" + build + ".conda", "channel": channel,
+		"url": channel + "/" + subdir + "/" + name + "-" + version + "-" + build + ".conda",
+	}
+}
+
+// withoutKeys returns m without the keys.
+func withoutKeys(m map[string]any, keys ...string) map[string]any {
+	for _, k := range keys {
+		delete(m, k)
+	}
+	return m
+}
+
+const cf = "https://conda.anaconda.org/conda-forge"
+
+func TestFreezeGoombaCondaMeta(t *testing.T) {
+	root := t.TempDir()
+	pySum, pipSum, pkSum, barSum := strings.Repeat("ab", 32), strings.Repeat("cd", 32), strings.Repeat("ef", 32), strings.Repeat("01", 32)
+	fakeGoombaFreezeEnv(t, root, "base-3.11", []map[string]any{
+		condaMetaRecord(cf, "linux-64", "python", "3.11.15", "hd63d673_0_cpython", pySum),
+		condaMetaRecord(cf, "noarch", "pip", "26.0.1", "pyh8b19718_0", pipSum),
+		condaMetaRecord(cf, "noarch", "packaging", "26.0", "pyhcf101f3_0", pkSum),
+		// A record from another channel, with an upper-case digest and
+		// neither fn nor channel.
+		withoutKeys(condaMetaRecord("https://example.org/chan", "linux-64", "bar", "2", "h_0", strings.ToUpper(barSum)), "fn", "channel"),
+		// Records lock.FromPrefix refuses: a file:// URL, no sha256.
+		condaMetaRecord("file:///srv/chan", "linux-64", "foo", "1", "0", strings.Repeat("23", 32)),
+		condaMetaRecord(cf, "linux-64", "baz", "3", "0", ""),
+	},
+		// pip freeze: a pip package, conda packages (one by file URL), an
+		// editable install and a mixed-case name.
+		"requests==2.31.0", "packaging==26.0", "pip @ file:///home/conda/feedstock_root/build_artifacts/pip_1/work",
+		"-e git+https://example.org/x.git#egg=x", "Foo_Bar==1.0")
 
 	env, err := CreateEnvironmentGoomba("base-3.11", root, "3.11", "", nil)
 	if err != nil {
@@ -532,48 +633,148 @@ func TestFreezeGoombaCondaMeta(t *testing.T) {
 	want := EnvironmentSpec{
 		Name:          "base-3.11",
 		PythonVersion: "3.11",
-		Channels:      []string{"conda-forge"},
+		// Legacy fields, as the micromamba freeze fills them: what pip
+		// lists (packaging, pip) is left out, and so are its channels.
+		CondaPackages: []string{"bar=2=h_0", "baz=3=0", "foo=1=0", "python=3.11.15=hd63d673_0_cpython"},
+		Channels:      []string{"https://example.org/chan", "conda-forge", "file:///srv/chan"},
+		// The freeze drops what follows '#' in a pip line, as it always has.
+		PipPackages: []string{"requests==2.31.0", "packaging==26.0", "pip", "-e git+https://example.org/x.git", "Foo_Bar==1.0"},
+		// Packages: every conda package, with its digest when it has one,
+		// and every name==version pip package.
 		Packages: []PackageSpec{
+			{Name: "bar", Version: "2", Build: "h_0", SHA256: barSum, Source: "conda"},
+			{Name: "baz", Version: "3", Build: "0", Source: "conda"},
+			{Name: "foo", Version: "1", Build: "0", SHA256: strings.Repeat("23", 32), Source: "conda"},
+			{Name: "packaging", Version: "26.0", Build: "pyhcf101f3_0", SHA256: pkSum, Source: "conda"},
 			{Name: "pip", Version: "26.0.1", Build: "pyh8b19718_0", SHA256: pipSum, Source: "conda"},
 			{Name: "python", Version: "3.11.15", Build: "hd63d673_0_cpython", SHA256: pySum, Source: "conda"},
+			{Name: "requests", Version: "2.31.0", Source: "pip"},
+			{Name: "packaging", Version: "26.0", Source: "pip"},
+			{Name: "Foo_Bar", Version: "1.0", Source: "pip"},
 		},
-		PipPackages: []string{"requests==2.31.0", "pip"},
 	}
 	if !reflect.DeepEqual(es, want) {
 		t.Errorf("frozen:\n got %+v\nwant %+v", es, want)
 	}
 
-	// Without pip, the conda packages are still frozen.
+	// Without pip, every conda package is in both forms.
 	env.PipPath = ""
 	if err := env.FreezeToFile(out); err != nil {
 		t.Fatal(err)
 	}
 	es = readSpec(t, out)
-	if len(es.Packages) != 2 || len(es.PipPackages) != 0 {
+	if len(es.Packages) != 6 || len(es.CondaPackages) != 6 || len(es.PipPackages) != 0 {
 		t.Errorf("frozen without pip: %+v", es)
-	}
-
-	// The frozen pins are what a goomba restore would solve for.
-	specs, err := restoreCondaSpecs(&es)
-	if err != nil || !reflect.DeepEqual(specs, []string{"pip==26.0.1=pyh8b19718_0", "python==3.11.15=hd63d673_0_cpython"}) {
-		t.Errorf("restore specs = %q, %v", specs, err)
 	}
 }
 
-func TestGoombaRestoreStrictNeedsChecksums(t *testing.T) {
-	specFile := filepath.Join(t.TempDir(), "env.json")
-	writeJSON(t, specFile, EnvironmentSpec{
-		Name: "strict", PythonVersion: "3.11",
-		Packages: []PackageSpec{{Name: "numpy", Version: "1.26.4", Source: "conda"}},
+// TestGoombaFreezeThroughAllRestores restores a goomba freeze with the
+// three restores (the micromamba ones with a logging fake micromamba and
+// pip) and checks that each one installs every conda and pip package.
+func TestGoombaFreezeThroughAllRestores(t *testing.T) {
+	noMicromambaDownload(t)
+	src := t.TempDir()
+	recs := []map[string]any{
+		condaMetaRecord(cf, "linux-64", "python", "3.11.15", "hd63d673_0_cpython", strings.Repeat("ab", 32)),
+		condaMetaRecord(cf, "linux-64", "numpy", "2.1.0", "py311_0", strings.Repeat("cd", 32)),
+		condaMetaRecord(cf, "noarch", "packaging", "26.0", "pyhcf101f3_0", strings.Repeat("ef", 32)),
+	}
+	fakeGoombaFreezeEnv(t, src, "e", recs, "requests==2.31.0", "packaging==26.0")
+	env, err := CreateEnvironmentGoomba("e", src, "3.11", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frozen := filepath.Join(t.TempDir(), "env.json")
+	if err := env.FreezeToFile(frozen); err != nil {
+		t.Fatal(err)
+	}
+
+	// restoreLog restores frozen with restore into a fake environment
+	// whose micromamba and pip log their calls, and returns the calls.
+	restoreLog := func(restore func(root string) error) string {
+		root := t.TempDir()
+		fakeGoombaFreezeEnv(t, root, "e", nil)
+		logf := filepath.Join(root, "calls.log")
+		writeShell := func(p, body string) {
+			if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(p, []byte("#!/bin/sh\n"+body), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		writeShell(filepath.Join(root, "bin", "micromamba"), "case \"$*\" in *--version*) echo 2.2.0; exit 0;; esac\necho \"micromamba $*\" >> "+logf+"\n")
+		writeShell(filepath.Join(root, "envs", "e", "bin", "pip"), "if [ \"$1\" = --version ]; then echo 'pip 26.0.1 from x (python 3.11)'; exit 0; fi\necho \"pip $*\" >> "+logf+"\n")
+		if out, err := RunReadStdout(filepath.Join(root, "bin", "micromamba"), "--version"); err != nil || strings.TrimSpace(out) != "2.2.0" {
+			t.Fatalf("the fake micromamba does not run (%q, %v)", out, err)
+		}
+		if err := restore(root); err != nil {
+			t.Fatal(err)
+		}
+		data, _ := os.ReadFile(logf)
+		return string(data)
+	}
+	wantCalls := func(name, calls string, want ...string) {
+		t.Helper()
+		for _, w := range want {
+			if !strings.Contains(calls, w) {
+				t.Errorf("%s restore: no %q in\n%s", name, w, calls)
+			}
+		}
+	}
+
+	legacy := restoreLog(func(root string) error {
+		_, err := CreateEnvironmentFromJSONFile(frozen, root, nil)
+		return err
 	})
+	wantCalls("legacy", legacy, " numpy=2.1.0=py311_0", " python=3.11.15=hd63d673_0_cpython", "requests==2.31.0", "packaging==26.0")
+
+	withOptions := restoreLog(func(root string) error {
+		_, err := CreateEnvironmentFromJSONFileWithOptions(frozen, root, RestoreOptions{}, nil)
+		return err
+	})
+	wantCalls("WithOptions", withOptions, " numpy=2.1.0=py311_0", " python=3.11.15=hd63d673_0_cpython", " packaging=26.0=pyhcf101f3_0", "requests==2.31.0", "packaging==26.0")
+
+	// The goomba restore: every conda package pinned in the one solve, then
+	// the pip packages.
+	es := readSpec(t, frozen)
+	specs, err := restoreCondaSpecs(&es)
+	if want := []string{"numpy==2.1.0=py311_0", "packaging==26.0=pyhcf101f3_0", "python==3.11.15=hd63d673_0_cpython"}; err != nil || !reflect.DeepEqual(specs, want) {
+		t.Errorf("goomba restore specs = %q, %v; want %q", specs, err, want)
+	}
+	pipCalls := restoreLog(func(root string) error {
+		e := &PythonEnvironment{PipPath: filepath.Join(root, "envs", "e", "bin", "pip")}
+		return restorePipPackages(e, &es, nil)
+	})
+	wantCalls("goomba", pipCalls, "requests==2.31.0", "packaging==26.0")
+}
+
+func TestGoombaRestoreStrictNeedsChecksums(t *testing.T) {
+	strict := RestoreOptions{VerifyChecksums: true, Strict: true}
+	for _, tc := range []struct {
+		name string
+		es   EnvironmentSpec
+		want string
+	}{
+		{"missing checksum", EnvironmentSpec{Name: "strict", PythonVersion: "3.11",
+			Packages: []PackageSpec{{Name: "numpy", Version: "1.26.4", Source: "conda"}}}, "lacks SHA256 checksum"},
+		{"pip package without checksum", EnvironmentSpec{Name: "strict", PythonVersion: "3.11",
+			Packages: []PackageSpec{{Name: "numpy", Version: "1.26.4", Source: "conda", SHA256: strings.Repeat("a", 64)}, {Name: "requests", Version: "2.31.0", Source: "pip"}}}, "lacks SHA256 checksum"},
+		{"legacy lists only", EnvironmentSpec{Name: "strict", PythonVersion: "3.11",
+			CondaPackages: []string{"numpy=1.26.4=py311_0"}}, "lists no packages"},
+	} {
+		specFile := filepath.Join(t.TempDir(), "env.json")
+		writeJSON(t, specFile, tc.es)
+		root := filepath.Join(t.TempDir(), "root")
+		_, err := CreateEnvironmentFromJSONFileGoomba(context.Background(), specFile, root, strict, GoombaOptions{}, nil)
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: err = %v, want %q", tc.name, err, tc.want)
+		}
+		if _, err := os.Stat(root); !os.IsNotExist(err) {
+			t.Errorf("%s: the root directory was created", tc.name)
+		}
+	}
 	root := filepath.Join(t.TempDir(), "root")
-	_, err := CreateEnvironmentFromJSONFileGoomba(context.Background(), specFile, root, RestoreOptions{VerifyChecksums: true, Strict: true}, GoombaOptions{}, nil)
-	if err == nil || !strings.Contains(err.Error(), "lacks SHA256 checksum") {
-		t.Fatalf("err = %v", err)
-	}
-	if _, err := os.Stat(root); !os.IsNotExist(err) {
-		t.Error("the root directory was created")
-	}
 	for _, bad := range []string{filepath.Join(t.TempDir(), "missing.json"), writeFile(t, "not json")} {
 		if _, err := CreateEnvironmentFromJSONFileGoomba(context.Background(), bad, root, RestoreOptions{}, GoombaOptions{}, nil); err == nil {
 			t.Errorf("%s: no error", bad)
@@ -691,5 +892,224 @@ func TestGoombaRefusesWindows(t *testing.T) {
 	}
 	if _, err := os.Stat(root); !os.IsNotExist(err) {
 		t.Error("the root directory was created")
+	}
+}
+
+// hangingChannel serves a TLS channel whose every request hangs until the
+// client gives up.
+func hangingChannel(t *testing.T) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-time.After(time.Minute):
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestGoombaTimeout(t *testing.T) {
+	srv := hangingChannel(t)
+	opts := GoombaOptions{PythonVersion: "3.11", Channels: []string{srv.URL + "/hang"}, Client: srv.Client(), Timeout: 300 * time.Millisecond}
+	start := time.Now()
+	_, err := CreateEnvironmentGoombaWithOptions(context.Background(), "e", t.TempDir(), opts, nil)
+	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "timed out after 300ms (GoombaOptions.Timeout)") {
+		t.Errorf("Timeout: err = %v", err)
+	}
+	if d := time.Since(start); d > 20*time.Second {
+		t.Errorf("Timeout of 300ms took %v", d)
+	}
+	// The caller's deadline is not blamed on GoombaOptions.Timeout.
+	opts.Timeout = time.Hour
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	_, err = CreateEnvironmentGoombaWithOptions(ctx, "e", t.TempDir(), opts, nil)
+	if !errors.Is(err, context.DeadlineExceeded) || strings.Contains(err.Error(), "GoombaOptions.Timeout") {
+		t.Errorf("caller deadline: err = %v", err)
+	}
+}
+
+func TestGoombaProgressSerialised(t *testing.T) {
+	var inFlight, overlaps, calls atomic.Int64
+	p := &goombaProgress{cb: func(string, int64, int64) {
+		if inFlight.Add(1) > 1 {
+			overlaps.Add(1)
+		}
+		calls.Add(1)
+		time.Sleep(50 * time.Microsecond)
+		inFlight.Add(-1)
+	}}
+	p.setLockfile(&lock.Lockfile{})
+	var wg sync.WaitGroup
+	for g := 0; g < 16; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 20; i++ {
+				p.installEvent(goomba.Event{Kind: goomba.EventLinked, Total: 320})
+				p.installEvent(goomba.Event{Kind: goomba.EventFetched, Package: "x", Total: 320})
+			}
+		}()
+	}
+	wg.Wait()
+	if overlaps.Load() != 0 || calls.Load() != 640 || p.linked != 320 {
+		t.Errorf("%d overlapping calls of %d, %d linked", overlaps.Load(), calls.Load(), p.linked)
+	}
+
+	// Nothing is reported once the context is done.
+	calls.Store(0)
+	ctx, cancel := context.WithCancel(context.Background())
+	p.setContext(ctx)
+	p.installEvent(goomba.Event{Kind: goomba.EventLinked, Total: 1})
+	cancel()
+	p.installEvent(goomba.Event{Kind: goomba.EventLinked, Total: 1})
+	p.lockEvent(goomba.Event{Kind: goomba.EventSolving})
+	p.say("Python environment created successfully", 100, 100)
+	if calls.Load() != 1 {
+		t.Errorf("%d calls, want 1 before the context was done", calls.Load())
+	}
+}
+
+func TestRestorePythonVersion(t *testing.T) {
+	py := func(v string) PackageSpec {
+		return PackageSpec{Name: "python", Version: v, Build: "h_0", Source: "conda"}
+	}
+	for _, tc := range []struct {
+		es       EnvironmentSpec
+		fallback string
+		want     string
+	}{
+		{EnvironmentSpec{PythonVersion: "3.12", Packages: []PackageSpec{py("3.11.9")}}, "3.10", "3.12"},
+		{EnvironmentSpec{Packages: []PackageSpec{py("3.11.9")}}, "", "3.11"},
+		{EnvironmentSpec{Packages: []PackageSpec{py("3.11.9")}}, "3.10", "3.11"},
+		{EnvironmentSpec{Packages: []PackageSpec{{Name: "Python", Version: "3.13.0rc1", Source: "conda"}}}, "", "3.13"},
+		{EnvironmentSpec{Packages: []PackageSpec{{Name: "python", Version: "3.11.9", Source: "pip"}}}, "3.10", "3.10"},
+		{EnvironmentSpec{Packages: []PackageSpec{py("3")}}, "3.9", "3.9"},
+		{EnvironmentSpec{CondaPackages: []string{"python=3.11"}}, "", ""},
+	} {
+		if got := restorePythonVersion(&tc.es, tc.fallback); got != tc.want {
+			t.Errorf("restorePythonVersion(%+v, %q) = %q, want %q", tc.es, tc.fallback, got, tc.want)
+		}
+	}
+	// What the solve then asks for: no python=3.10 beside the pin.
+	es := &EnvironmentSpec{Packages: []PackageSpec{py("3.11.9")}}
+	specs, _ := restoreCondaSpecs(es)
+	opts := GoombaOptions{PythonVersion: restorePythonVersion(es, "")}.withDefaults()
+	if got := goombaSpecs(opts.PythonVersion, specs); !reflect.DeepEqual(got, []string{"python=3.11", "python==3.11.9=h_0", "pip"}) {
+		t.Errorf("specs = %q", got)
+	}
+}
+
+// loggingPip returns an environment whose pip appends its arguments to a
+// log, and the log's path.
+func loggingPip(t *testing.T) (*PythonEnvironment, string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script fake pip is POSIX-only")
+	}
+	dir := t.TempDir()
+	logf := filepath.Join(dir, "pip.log")
+	pip := filepath.Join(dir, "pip")
+	if err := os.WriteFile(pip, []byte("#!/bin/sh\necho \"$*\" >> "+logf+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return &PythonEnvironment{PipPath: pip}, logf
+}
+
+func TestRestorePipPackages(t *testing.T) {
+	read := func(p string) string { data, _ := os.ReadFile(p); return string(data) }
+	// With Packages: its pip packages one at a time; legacy PipPackages are
+	// ignored, as CreateEnvironmentFromJSONFileWithOptions ignores them.
+	env, logf := loggingPip(t)
+	es := &EnvironmentSpec{
+		Packages: []PackageSpec{
+			{Name: "numpy", Version: "1.26.4", Source: "conda"},
+			{Name: "requests", Version: "2.31.0", Source: "pip"},
+			{Name: "idna", Version: "3.7", Source: "pip"},
+		},
+		PipPackages: []string{"legacy==1.0"},
+	}
+	if err := restorePipPackages(env, es, nil); err != nil {
+		t.Fatal(err)
+	}
+	got := read(logf)
+	if strings.Count(got, "install ") != 2 || !strings.Contains(got, " requests==2.31.0 ") || !strings.Contains(got, " idna==3.7 ") ||
+		strings.Contains(got, "legacy") || strings.Contains(got, "numpy") {
+		t.Errorf("pip calls with Packages:\n%s", got)
+	}
+	// Without Packages: the legacy list, in one call.
+	env, logf = loggingPip(t)
+	if err := restorePipPackages(env, &EnvironmentSpec{PipPackages: []string{"a==1", "b==2"}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := read(logf); strings.Count(got, "install ") != 1 || !strings.Contains(got, " a==1 b==2 ") {
+		t.Errorf("pip calls with legacy PipPackages:\n%s", got)
+	}
+}
+
+func TestRemoveCreatedEnv(t *testing.T) {
+	cause := errors.New("pip failed")
+	newEnv := func() (string, os.FileInfo) {
+		p := filepath.Join(t.TempDir(), "envs", "e")
+		if err := os.MkdirAll(filepath.Join(p, "conda-meta"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		fi, err := os.Lstat(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return p, fi
+	}
+
+	p, fi := newEnv()
+	err := removeCreatedEnv(p, fi, cause)
+	if !errors.Is(err, cause) || !strings.Contains(err.Error(), "was removed") {
+		t.Errorf("removed: err = %v", err)
+	}
+	if _, serr := os.Lstat(p); !os.IsNotExist(serr) {
+		t.Errorf("the environment is still there (%v)", serr)
+	}
+
+	// A directory that replaced the one created is not removed.
+	p, fi = newEnv()
+	if err := os.Rename(p, p+".moved"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(p, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	err = removeCreatedEnv(p, fi, cause)
+	if !errors.Is(err, cause) || !strings.Contains(err.Error(), "left behind at "+p) || !strings.Contains(err.Error(), "replaced") {
+		t.Errorf("replaced: err = %v", err)
+	}
+	if _, serr := os.Lstat(p); serr != nil {
+		t.Errorf("the replacement was removed (%v)", serr)
+	}
+
+	// A removal that fails says where the environment was left.
+	if runtime.GOOS != "windows" && os.Geteuid() != 0 {
+		p, fi = newEnv()
+		locked := filepath.Join(p, "locked")
+		if err := os.MkdirAll(filepath.Join(locked, "sub"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(locked, 0o555); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { os.Chmod(locked, 0o755) })
+		err = removeCreatedEnv(p, fi, cause)
+		if !errors.Is(err, cause) || !strings.Contains(err.Error(), "left behind at "+p) || !strings.Contains(err.Error(), "removing it failed") {
+			t.Errorf("removal failed: err = %v", err)
+		}
+	}
+
+	// One that is gone already.
+	p, fi = newEnv()
+	if err := os.RemoveAll(p); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeCreatedEnv(p, fi, cause); !errors.Is(err, cause) || !strings.Contains(err.Error(), "no longer exists") {
+		t.Errorf("gone: err = %v", err)
 	}
 }

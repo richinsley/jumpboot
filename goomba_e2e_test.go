@@ -328,11 +328,22 @@ func TestGoombaEndToEndOffline(t *testing.T) {
 	if python311 == nil {
 		t.Skipf("no python 3.11 in $GOOMBA_REF_ROOT/pkgs (newest: %v)", py["version"])
 	}
-	restore := func(name string, pkgs ...PackageSpec) (*PythonEnvironment, error) {
+	restoreWith := func(ropts RestoreOptions, name string, pkgs ...PackageSpec) (*PythonEnvironment, error) {
 		p := filepath.Join(t.TempDir(), name+".json")
 		writeJSON(t, p, EnvironmentSpec{Name: name, PythonVersion: "3.11", Channels: []string{ch.url}, Packages: pkgs})
-		return CreateEnvironmentFromJSONFileGoomba(ctx, p, root, RestoreOptions{VerifyChecksums: true, Strict: true},
-			GoombaOptions{Client: ch.srv.Client()}, nil)
+		return CreateEnvironmentFromJSONFileGoomba(ctx, p, root, ropts, GoombaOptions{Client: ch.srv.Client()}, nil)
+	}
+	restore := func(name string, pkgs ...PackageSpec) (*PythonEnvironment, error) {
+		return restoreWith(RestoreOptions{VerifyChecksums: true}, name, pkgs...)
+	}
+	// Strict needs every solved package listed with its checksum: python's
+	// dependencies are not, so nothing is installed.
+	if _, err := restoreWith(RestoreOptions{VerifyChecksums: true, Strict: true}, "partial", pinned(python311), pinned(packaging)); err == nil ||
+		!strings.Contains(err.Error(), "is in the solution but not among the specification's conda packages") {
+		t.Errorf("strict restore of a partial list: err = %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, "envs", "partial")); !os.IsNotExist(err) {
+		t.Errorf("the refused strict restore left an environment (%v)", err)
 	}
 	restored, err := restore("restored", pinned(python311), pinned(packaging))
 	if err != nil {
@@ -344,6 +355,20 @@ func TestGoombaEndToEndOffline(t *testing.T) {
 	}
 	if restored.Backend != BackendGoomba || !restored.IsNew || restored.PipVersion.Major <= 0 {
 		t.Errorf("restored %+v", restored.BaseEnvironment)
+	}
+
+	// The pins reached the solver: the history records them as the specs.
+	hist, err := os.ReadFile(filepath.Join(restored.EnvPath, "conda-meta", "history"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, pin := range []string{
+		"python==" + python311["version"].(string) + "=" + python311["build"].(string),
+		"packaging==" + packaging["version"].(string) + "=" + packaging["build"].(string),
+	} {
+		if !strings.Contains(string(hist), "# update specs: ") || !strings.Contains(string(hist), `"`+pin+`"`) {
+			t.Errorf("the history does not record the pin %q:\n%s", pin, hist)
+		}
 	}
 
 	// A wrong checksum fails before anything is installed.
@@ -378,4 +403,89 @@ func TestGoombaEndToEndOffline(t *testing.T) {
 
 	// A concurrent installation into the same environment.
 	testPrefixLocked(t, ctx, root, ch, python311)
+
+	// Freeze, then restore with Strict: everything installed is verified,
+	// and the copy holds the same packages.
+	es = readSpec(t, frozen)
+	es.Name = "copy"
+	copySpec := filepath.Join(t.TempDir(), "copy.json")
+	writeJSON(t, copySpec, es)
+	cp, err := CreateEnvironmentFromJSONFileGoomba(ctx, copySpec, root, RestoreOptions{VerifyChecksums: true, Strict: true}, GoombaOptions{Client: ch.srv.Client()}, nil)
+	if err != nil {
+		t.Fatalf("freeze -> strict restore: %v", err)
+	}
+	a, b := readCondaMetaPackages(t, env.EnvPath), readCondaMetaPackages(t, cp.EnvPath)
+	if len(a) != len(b) {
+		t.Errorf("the copy has %d packages, the original %d", len(b), len(a))
+	}
+	for n, p := range a {
+		if q, ok := b[n]; !ok || p.Version != q.Version || p.Build != q.Build || p.SHA256 != q.SHA256 {
+			t.Errorf("%s: original %+v, copy %+v", n, p, q)
+		}
+	}
+
+	// A failing pip step removes the new environment, so a retry fails the
+	// same way instead of finding the environment in its way.
+	pipFail := filepath.Join(t.TempDir(), "pipfail.json")
+	writeJSON(t, pipFail, EnvironmentSpec{Name: "pipfail", PythonVersion: "3.11", Channels: []string{ch.url},
+		Packages: []PackageSpec{pinned(python311), {Name: "--jumpboot-no-such-option", Version: "1", Source: "pip"}}})
+	for try := 1; try <= 2; try++ {
+		_, err := CreateEnvironmentFromJSONFileGoomba(ctx, pipFail, root, RestoreOptions{}, GoombaOptions{Client: ch.srv.Client()}, nil)
+		if err == nil || !strings.Contains(err.Error(), "error installing pip package") || !strings.Contains(err.Error(), "was removed") {
+			t.Errorf("pip failure, try %d: err = %v", try, err)
+		}
+		if _, err := os.Lstat(filepath.Join(root, "envs", "pipfail")); !os.IsNotExist(err) {
+			t.Errorf("pip failure, try %d: the environment was left (%v)", try, err)
+		}
+	}
+
+	testChannelOrderHint(t, ctx, ch, python311)
+}
+
+// testChannelOrderHint restores a specification whose two channels are
+// listed lowest priority first: the high-priority channel has the pinned
+// packaging, the other only a decoy of the same name. Strict priority
+// takes packaging from the first channel listed, so the request is
+// unsolvable, and the error says the channel order matters.
+func testChannelOrderHint(t *testing.T, ctx context.Context, ref *refChannel, python map[string]any) {
+	t.Helper()
+	pk := ref.entry(t, "packaging")
+	decoy := map[string]any{}
+	for k, v := range pk {
+		decoy[k] = v
+	}
+	decoy["version"], decoy["build"] = "0.0.1", "decoy_0"
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		parts := strings.SplitN(strings.TrimPrefix(r.URL.Path, "/"), "/", 3)
+		if len(parts) != 3 || parts[2] != "repodata.json" || (parts[0] != "high" && parts[0] != "low") {
+			if len(parts) == 3 {
+				if src, ok := ref.files[parts[1]+"/"+parts[2]]; ok && parts[0] == "high" {
+					if p, err := ref.copyArchive(src, parts[1], parts[2]); err == nil {
+						http.ServeFile(w, r, p)
+						return
+					}
+				}
+			}
+			http.NotFound(w, r)
+			return
+		}
+		conda := map[string]any{}
+		if parts[0] == "high" {
+			for fn, e := range ref.index[parts[1]] {
+				conda[fn] = e
+			}
+		} else if parts[1] == pk["subdir"] {
+			conda["packaging-0.0.1-decoy_0.conda"] = decoy
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"info": map[string]any{"subdir": parts[1]}, "packages": map[string]any{}, "packages.conda": conda, "repodata_version": 1})
+	}))
+	defer srv.Close()
+	p := filepath.Join(t.TempDir(), "order.json")
+	writeJSON(t, p, EnvironmentSpec{Name: "order", PythonVersion: "3.11", Channels: []string{srv.URL + "/low", srv.URL + "/high"},
+		Packages: []PackageSpec{pinned(python), pinned(pk)}})
+	_, err := CreateEnvironmentFromJSONFileGoomba(ctx, p, t.TempDir(), RestoreOptions{}, GoombaOptions{Client: srv.Client()}, nil)
+	var u *solve.Unsolvable
+	if !errors.As(err, &u) || !strings.Contains(err.Error(), "lists 2 channels") {
+		t.Errorf("channels in the wrong order: err = %v, want *solve.Unsolvable mentioning the channel order", err)
+	}
 }

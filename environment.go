@@ -831,11 +831,20 @@ func CreateVenvEnvironment(baseEnv *PythonEnvironment, venvPath string, options 
 //
 // For a goomba environment (Backend BackendGoomba), the conda packages are
 // read from the environment's conda-meta records instead of running
-// micromamba, and recorded in Packages with Source "conda", version, build
-// and sha256, every one of them (pip's view of the same packages does not
-// remove them); restore such a file with CreateEnvironmentFromJSONFileGoomba.
-// An environment whose goomba installation did not finish is refused
-// (ErrIncompleteEnvironment).
+// micromamba, and the file holds both forms of the specification, so that
+// every restore reads it completely:
+//   - the legacy CondaPackages ("name=version=build") and Channels, filled
+//     as for a micromamba environment (packages pip freeze also lists are
+//     left out), which CreateEnvironmentFromJSONFile reads;
+//   - Packages: every conda package (Source "conda", with version, build
+//     and its sha256 when the record has one) and every pip package of the
+//     form name==version (Source "pip"), which
+//     CreateEnvironmentFromJSONFileWithOptions and
+//     CreateEnvironmentFromJSONFileGoomba read.
+//
+// With either backend, Channels lists the channels in the order the
+// packages name them, not in priority order. An environment whose goomba
+// installation did not finish is refused (ErrIncompleteEnvironment).
 //
 // File URLs in pip freeze output are cleaned to show only package names.
 func (env *PythonEnvironment) FreezeToFile(filePath string) error {
