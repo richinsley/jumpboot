@@ -4,8 +4,8 @@ github.com/klauspost/compress v1.18.0 h1:c/Cqfb0r+Yi+JtIEq73FWXVkRonBlf0CRNYc8Zt
 github.com/klauspost/compress v1.18.0/go.mod h1:2Pp+KzxcywXVXMr50+X0Q/Lsb43OQHYWRCY2AiWywWQ=
 github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
-github.com/richinsley/goomba v0.0.0-20261018064459-565ce5464266 h1:PREWFcrlEZqJ5qv8B0AjNu7Ei9HhWg1I4Id1sEeu3sg=
-github.com/richinsley/goomba v0.0.0-20261018064459-565ce5464266/go.mod h1:2tW0mJoqxnzm+LGmsOLl6tip61vuy/HIUqNwBQgH+Ug=
+github.com/richinsley/goomba v0.0.0-20261018141742-d38424252bf5 h1:M3q30gN1v9QM6sEkHN5PdQ2EH3GaX2tM53B7BZyleZs=
+github.com/richinsley/goomba v0.0.0-20261018141742-d38424252bf5/go.mod h1:2tW0mJoqxnzm+LGmsOLl6tip61vuy/HIUqNwBQgH+Ug=
 github.com/stretchr/testify v1.6.1 h1:hDPOHmpOpP40lSULcqw7IrRb/u7w6RpDC9399XyoNd0=
 github.com/stretchr/testify v1.6.1/go.mod h1:6Fq8oRcR53rry900zMqJjRRixrwX3KX962/h/Wwjteg=
 github.com/vmihailenco/msgpack/v5 v5.4.1 h1:cQriyiUvjTwOHg8QZaPihLWeRAAVoCpE00IUPn0Bjt8=
