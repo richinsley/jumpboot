@@ -670,8 +670,9 @@ func testCreateCheckFails(t *testing.T, ctx context.Context, root string, opts G
 }
 
 // testCheckResolvedPrefix creates under a symlinked root: the check inside
-// the transaction runs the interpreter at goomba's resolved prefix, and
-// the environment returned keeps the root as given.
+// the transaction runs the interpreter at goomba's resolved prefix, the
+// environment returned keeps the root as given, and what the check found
+// (here: no libpython) carries over to it.
 func testCheckResolvedPrefix(t *testing.T, ctx context.Context, ch *refChannel, opts GoombaOptions) {
 	t.Helper()
 	real := t.TempDir()
@@ -687,7 +688,9 @@ func testCheckResolvedPrefix(t *testing.T, ctx context.Context, ch *refChannel, 
 	orig := checkGoombaEnvironment
 	checkGoombaEnvironment = func(e *PythonEnvironment, v Version) error {
 		checked = e.PythonPath
-		return orig(e, v)
+		err := orig(e, v)
+		e.PythonLibPath = "" // as the check reports a missing libpython
+		return err
 	}
 	env, err := CreateEnvironmentGoombaWithOptions(ctx, "linked", link, opts, nil)
 	checkGoombaEnvironment = orig
@@ -699,5 +702,8 @@ func testCheckResolvedPrefix(t *testing.T, ctx context.Context, ch *refChannel, 
 	}
 	if want := filepath.Join(link, "envs", "linked", "bin", "python"); env.PythonPath != want {
 		t.Errorf("PythonPath %q, want %q", env.PythonPath, want)
+	}
+	if env.PythonLibPath != "" {
+		t.Errorf("PythonLibPath %q, want \"\" as the check found no libpython", env.PythonLibPath)
 	}
 }
