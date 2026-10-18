@@ -31,6 +31,24 @@ type Runtime interface {
 	Freeze(filePath string) error
 }
 
+// Backend says which tool manages a conda environment: the tool the function
+// that returned the environment used to create or reuse it. Environments
+// created by either backend have the same layout and are interchangeable.
+type Backend string
+
+const (
+	// BackendNone is the backend of environments no conda tool manages:
+	// the system Python, a given executable, or a virtual environment.
+	BackendNone Backend = ""
+	// BackendMicromamba is the backend of environments returned by
+	// CreateEnvironmentMamba and the JSON restores built on it.
+	BackendMicromamba Backend = "micromamba"
+	// BackendGoomba is the backend of environments returned by
+	// CreateEnvironmentGoomba, CreateEnvironmentGoombaWithOptions and
+	// CreateEnvironmentFromJSONFileGoomba.
+	BackendGoomba Backend = "goomba"
+)
+
 // BaseEnvironment contains common fields for any conda-managed environment.
 // This is embedded in runtime-specific environment types like PythonEnvironment.
 // It provides the foundation for container management independent of the runtime.
@@ -54,12 +72,17 @@ type BaseEnvironment struct {
 	MicromambaVersion Version
 
 	// MicromambaPath is the full path to the micromamba executable.
-	// Empty for system Python or venv environments.
+	// Empty for system Python, venv and goomba environments.
 	MicromambaPath string
 
 	// IsNew indicates whether this environment was newly created (true)
 	// or already existed (false).
 	IsNew bool
+
+	// Backend is the tool that manages the environment: BackendMicromamba,
+	// BackendGoomba, or BackendNone for system Python, executables and
+	// virtual environments.
+	Backend Backend
 }
 
 // PythonEnvironment represents a Python environment with all necessary paths and version
@@ -292,6 +315,7 @@ func CreateEnvironmentMamba(envName string, rootDir string, pythonVersion string
 			EnvironmentName: envName,
 			RootDir:         rootDir,
 			MicromambaPath:  filepath.Join(binDirectory, executableName),
+			Backend:         BackendMicromamba,
 		},
 	}
 
@@ -363,8 +387,21 @@ func CreateEnvironmentMamba(envName string, rootDir string, pythonVersion string
 	}
 
 	// Construct the full paths to the Python and pip executables within the created environment
-	env.EnvPath = envPath
-	if platform == "windows" {
+	setCondaEnvPaths(env, platform, requestedVersion)
+	if err := checkCondaEnvironment(env, requestedVersion); err != nil {
+		return nil, err
+	}
+	return env, nil
+}
+
+// setCondaEnvPaths fills the path fields of env for the conda environment
+// env.RootDir/envs/env.EnvironmentName as laid out on the operating system
+// goos (a runtime.GOOS value), with requestedVersion choosing the Python
+// directories. CreateEnvironmentMamba and the goomba functions share it, so
+// the environments of both backends have the same paths.
+func setCondaEnvPaths(env *PythonEnvironment, goos string, requestedVersion Version) {
+	env.EnvPath = filepath.Join(env.RootDir, "envs", env.EnvironmentName)
+	if goos == "windows" {
 		env.EnvBinPath = filepath.Join(env.RootDir, "envs", env.EnvironmentName)
 		env.PythonPath = filepath.Join(env.EnvBinPath, "python.exe")
 		env.PipPath = filepath.Join(env.RootDir, "envs", env.EnvironmentName, "Scripts", "pip.exe")
@@ -379,9 +416,9 @@ func CreateEnvironmentMamba(envName string, rootDir string, pythonVersion string
 	// find the python lib path
 	env.EnvLibPath = filepath.Join(env.RootDir, "envs", env.EnvironmentName, "lib")
 	env.PythonLibPath = env.EnvLibPath
-	if platform == "windows" {
+	if goos == "windows" {
 		env.PythonLibPath = filepath.Join(env.RootDir, "envs", env.EnvironmentName, "python"+requestedVersion.MinorStringCompact()+".dll")
-	} else if platform == "darwin" {
+	} else if goos == "darwin" {
 		env.PythonLibPath = filepath.Join(env.RootDir, "envs", env.EnvironmentName, "lib", "libpython"+requestedVersion.MinorString()+".dylib")
 	} else {
 		env.PythonLibPath = filepath.Join(env.RootDir, "envs", env.EnvironmentName, "lib", "libpython"+requestedVersion.MinorString()+".so")
@@ -389,15 +426,21 @@ func CreateEnvironmentMamba(envName string, rootDir string, pythonVersion string
 
 	// find the python headers path
 	env.PythonHeadersPath = filepath.Join(env.RootDir, "envs", env.EnvironmentName, "include", "python"+requestedVersion.MinorString())
+}
 
+// checkCondaEnvironment runs the checks CreateEnvironmentMamba makes on a
+// conda environment whose paths setCondaEnvPaths filled: it records the
+// Python and pip versions, clears PythonLibPath when the library is
+// missing, and requires Python to be at least requestedVersion.
+func checkCondaEnvironment(env *PythonEnvironment, requestedVersion Version) error {
 	// Check if the Python executable exists and get its version
 	pver, err := RunReadStdout(env.PythonPath, "--version")
 	if err != nil {
-		return nil, fmt.Errorf("error running python --version: %v", err)
+		return fmt.Errorf("error running python --version: %v", err)
 	}
 	env.PythonVersion, err = ParsePythonVersion(pver)
 	if err != nil {
-		return nil, fmt.Errorf("error parsing Python version: %v", err)
+		return fmt.Errorf("error parsing Python version: %v", err)
 	}
 	// Check if the Python lib exists
 	if _, err := os.Stat(env.PythonLibPath); os.IsNotExist(err) {
@@ -407,19 +450,18 @@ func CreateEnvironmentMamba(envName string, rootDir string, pythonVersion string
 	// Check if the pip executable exists and get its version
 	pipver, err := RunReadStdout(env.PipPath, "--version")
 	if err != nil {
-		return nil, fmt.Errorf("error running pip --version: %v", err)
+		return fmt.Errorf("error running pip --version: %v", err)
 	}
 	env.PipVersion, err = ParsePipVersion(pipver)
 	if err != nil {
-		return nil, fmt.Errorf("error parsing pip version: %v", err)
+		return fmt.Errorf("error parsing pip version: %v", err)
 	}
 
 	// ensure the python version is equal or greater than the requested version
 	if env.PythonVersion.Compare(requestedVersion) < 0 {
-		return nil, fmt.Errorf("requested python version %s is not available, found %s", requestedVersion.String(), env.PythonVersion.String())
+		return fmt.Errorf("requested python version %s is not available, found %s", requestedVersion.String(), env.PythonVersion.String())
 	}
-
-	return env, nil
+	return nil
 }
 
 // CreateEnvironmentFromExacutable creates a PythonEnvironment from an existing Python executable.
