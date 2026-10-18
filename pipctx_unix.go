@@ -8,10 +8,10 @@ import (
 	"syscall"
 )
 
-// setPipProcessGroup starts pip in a process group of its own and makes
-// cancellation kill the whole group, so that the build backends pip runs
-// die with it.
-func setPipProcessGroup(cmd *exec.Cmd) {
+// setProcessGroup starts cmd in a process group of its own and makes
+// cancellation kill the whole group, so that the processes cmd starts
+// (pip's build backends, say) die with it.
+func setProcessGroup(cmd *exec.Cmd) {
 	if cmd.SysProcAttr == nil {
 		cmd.SysProcAttr = &syscall.SysProcAttr{}
 	}

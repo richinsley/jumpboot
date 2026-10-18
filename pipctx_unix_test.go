@@ -154,7 +154,7 @@ func TestPipInstallContextEscapedOutput(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("err = %v, want context.Canceled", err)
 	}
-	if d := time.Since(start); d > 3*pipWaitDelay {
+	if d := time.Since(start); d > 3*childWaitDelay {
 		t.Errorf("returned after %v", d)
 	}
 	// The escaped process outlived the group kill, holding the output: end

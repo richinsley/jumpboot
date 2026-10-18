@@ -4,6 +4,7 @@ package jumpboot
 
 import "os/exec"
 
-// setPipProcessGroup keeps exec.CommandContext's default cancellation,
-// which kills pip only: the goomba backend, the only user, refuses Windows.
-func setPipProcessGroup(cmd *exec.Cmd) {}
+// setProcessGroup keeps exec.CommandContext's default cancellation, which
+// kills the command only: the goomba backend, the only user, refuses
+// Windows.
+func setProcessGroup(cmd *exec.Cmd) {}

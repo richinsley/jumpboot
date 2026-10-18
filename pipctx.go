@@ -10,9 +10,23 @@ import (
 	"time"
 )
 
-// pipWaitDelay bounds how long pipInstallContext waits, once ctx is done
-// and pip is killed, for pip's output to close and for Wait to return.
-const pipWaitDelay = 5 * time.Second
+// childWaitDelay bounds how long a command from groupCommand is waited
+// for, once ctx is done and its process group is killed, for its output to
+// close and for Wait to return.
+const childWaitDelay = 5 * time.Second
+
+// groupCommand returns a command for name that runs in a process group of
+// its own (on Unix) and is killed with its whole group when ctx is done, so
+// that the processes it starts die with it. Once ctx is done, os/exec
+// closes the command's output pipes after childWaitDelay at the latest,
+// even if a process outside the group still holds them, so neither reading
+// its output nor Wait can hang.
+func groupCommand(ctx context.Context, name string, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, name, args...)
+	setProcessGroup(cmd)
+	cmd.WaitDelay = childWaitDelay
+	return cmd
+}
 
 // pipExecutable returns the pip program pipInstallContext runs for env;
 // tests replace it.
@@ -42,12 +56,7 @@ func pipInstallContext(ctx context.Context, env *PythonEnvironment, packages []s
 	// cancel also stops pip when the callback panics.
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, pipExecutable(env), args...)
-	setPipProcessGroup(cmd)
-	// Once ctx is done and pip is killed, os/exec closes pip's output pipes
-	// after WaitDelay at the latest, even if a process outside pip's group
-	// still holds them, so neither the reading below nor Wait can hang.
-	cmd.WaitDelay = pipWaitDelay
+	cmd := groupCommand(ctx, pipExecutable(env), args...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	stdout, err := cmd.StdoutPipe()
