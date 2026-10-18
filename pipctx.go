@@ -14,6 +14,10 @@ import (
 // and pip is killed, for pip's output to close and for Wait to return.
 const pipWaitDelay = 5 * time.Second
 
+// pipExecutable returns the pip program pipInstallContext runs for env;
+// tests replace it.
+var pipExecutable = func(env *PythonEnvironment) string { return env.PipPath }
+
 // pipInstallContext installs packages with env's pip as PipInstallPackages
 // does (same arguments, one progress call per line of pip's standard
 // output, pip's standard error in the error), but stops when ctx is done:
@@ -38,7 +42,7 @@ func pipInstallContext(ctx context.Context, env *PythonEnvironment, packages []s
 	// cancel also stops pip when the callback panics.
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, env.PipPath, args...)
+	cmd := exec.CommandContext(ctx, pipExecutable(env), args...)
 	setPipProcessGroup(cmd)
 	// Once ctx is done and pip is killed, os/exec closes pip's output pipes
 	// after WaitDelay at the latest, even if a process outside pip's group
