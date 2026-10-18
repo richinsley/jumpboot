@@ -25,13 +25,6 @@ func unsetenv(t *testing.T, key string) {
 	t.Cleanup(func() { os.Setenv(key, old) })
 }
 
-// differentialPin is given to both backends by the differential. goomba
-// f77270e cannot install conda-forge's ncurses 6.6 (hdb14827_1): its link
-// step refuses the terminfo symlink target ".././61/adm1178" as "not in
-// normal form" (link.ErrUnsafePath), and every Python environment on
-// Linux needs ncurses. Remove the pin once goomba accepts that target.
-const differentialPin = "ncurses<6.6"
-
 // condaMetaPackage is what the differential compares of a conda-meta record.
 type condaMetaPackage struct {
 	Version string `json:"version"`
@@ -73,8 +66,8 @@ func readCondaMetaPackages(t *testing.T, prefix string) map[string]condaMetaPack
 // packages recorded in conda-meta. micromamba is $GOOMBA_MICROMAMBA,
 // placed in the scratch root's bin/ so that nothing is downloaded from
 // GitHub, and runs with a scratch HOME, an explicit MAMBA_ROOT_PREFIX and
-// no other CONDA_* or MAMBA_* variable of the developer's shell. Both
-// backends get differentialPin (micromamba through MAMBA_PINNED_PACKAGES).
+// no other CONDA_* or MAMBA_* variable of the developer's shell. Neither
+// backend gets a pin: both must agree on current conda-forge.
 func TestGoombaDifferentialMicromamba(t *testing.T) {
 	mm := os.Getenv("GOOMBA_MICROMAMBA")
 	if mm == "" || os.Getenv("GOOMBA_LIVE") != "1" {
@@ -108,7 +101,6 @@ func TestGoombaDifferentialMicromamba(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
 	t.Setenv("MAMBA_ROOT_PREFIX", mRoot)
-	t.Setenv("MAMBA_PINNED_PACKAGES", differentialPin)
 
 	start := time.Now()
 	m, err := CreateEnvironmentMamba("base-3.12", mRoot, "3.12", "conda-forge", nil)
@@ -119,7 +111,7 @@ func TestGoombaDifferentialMicromamba(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
 	defer cancel()
 	start = time.Now()
-	g, err := CreateEnvironmentGoombaWithOptions(ctx, "base-3.12", gRoot, GoombaOptions{PythonVersion: "3.12", Channels: []string{"conda-forge"}, Specs: []string{differentialPin}}, nil)
+	g, err := CreateEnvironmentGoombaWithOptions(ctx, "base-3.12", gRoot, GoombaOptions{PythonVersion: "3.12", Channels: []string{"conda-forge"}}, nil)
 	if err != nil {
 		t.Fatalf("goomba: %v", err)
 	}
