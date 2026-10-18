@@ -123,7 +123,8 @@ type GoombaOptions struct {
 	// https://conda.anaconda.org.
 	ChannelAlias string
 
-	// Timeout bounds resolving plus installing, and for
+	// Timeout bounds resolving, installing and the python and pip version
+	// check (also of an environment that is reused), and for
 	// CreateEnvironmentFromJSONFileGoomba the pip step too; 0 means 10
 	// minutes. It applies on top of the caller's context. Raise it for
 	// large pip installs.
@@ -257,7 +258,7 @@ func CreateEnvironmentGoombaWithOptions(ctx context.Context, envName, rootDir st
 		// fails them is rolled back, never left looking finished.
 		j.env.IsNew = true
 		j.progress.beforeCommit = "Checking the environment"
-		check := func(_ context.Context, prefix string) error { return j.checkAt(prefix) }
+		check := func(hctx context.Context, prefix string) error { return j.checkAt(hctx, prefix) }
 		if err := j.create(ctx, goombaSpecs(j.opts.PythonVersion, j.opts.Specs), nil, check); err != nil {
 			return nil, fmt.Errorf("error creating environment: %w", err)
 		}
@@ -265,9 +266,13 @@ func CreateEnvironmentGoombaWithOptions(ctx context.Context, envName, rootDir st
 		j.progress.say("Python environment created successfully", 100, 100)
 		return j.env, nil
 	}
+	// Reuse: the check is bounded by ctx and Timeout too, so that a hung
+	// interpreter cannot hold the caller.
 	setCondaEnvPaths(j.env, runtime.GOOS, j.requested)
-	if err := checkGoombaEnvironment(j.env, j.requested); err != nil {
-		return nil, err
+	tctx, cancel := context.WithTimeout(ctx, j.opts.Timeout)
+	defer cancel()
+	if err := checkGoombaEnvironment(tctx, j.env, j.requested); err != nil {
+		return nil, j.timedOut(ctx, err)
 	}
 	return j.env, nil
 }
@@ -377,7 +382,7 @@ func CreateEnvironmentFromJSONFileGoomba(ctx context.Context, filePath, rootDir 
 		j.progress.beforeCommit = "Installing pip packages"
 	}
 	finish := func(hctx context.Context, prefix string) error {
-		if err := j.checkAt(prefix); err != nil {
+		if err := j.checkAt(hctx, prefix); err != nil {
 			return err
 		}
 		return restorePipPackages(hctx, j.checked, &es, progressCallback)
@@ -515,16 +520,16 @@ type goombaJob struct {
 }
 
 // checkGoombaEnvironment runs the checks CreateEnvironmentMamba runs on an
-// environment; tests replace it.
-var checkGoombaEnvironment = checkCondaEnvironment
+// environment, bounded by ctx; tests replace it.
+var checkGoombaEnvironment = checkCondaEnvironmentContext
 
 // checkAt checks the new environment at prefix, the resolved path goomba
-// installs into, from inside goomba's transaction, and keeps the result
-// for finish.
-func (j *goombaJob) checkAt(prefix string) error {
+// installs into, from inside goomba's transaction with the hook's ctx, and
+// keeps the result for finish.
+func (j *goombaJob) checkAt(ctx context.Context, prefix string) error {
 	e := &PythonEnvironment{}
 	setCondaEnvPathsAt(e, prefix, runtime.GOOS, j.requested)
-	if err := checkGoombaEnvironment(e, j.requested); err != nil {
+	if err := checkGoombaEnvironment(ctx, e, j.requested); err != nil {
 		return err
 	}
 	j.checked = e
@@ -682,7 +687,13 @@ func (j *goombaJob) create(ctx context.Context, specs []string, verify func(*loc
 	defer cancel()
 	j.progress.setContext(tctx)
 	defer j.progress.setContext(ctx)
-	err := j.lockAndInstall(tctx, specs, verify, beforeCommit)
+	return j.timedOut(ctx, j.lockAndInstall(tctx, specs, verify, beforeCommit))
+}
+
+// timedOut explains an error that the job's Timeout caused (its deadline
+// expired while the caller's ctx did not); other errors are returned as
+// they are.
+func (j *goombaJob) timedOut(ctx context.Context, err error) error {
 	if err != nil && errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
 		return fmt.Errorf("timed out after %v (GoombaOptions.Timeout): %w", j.opts.Timeout, err)
 	}

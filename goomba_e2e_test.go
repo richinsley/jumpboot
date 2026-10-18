@@ -651,7 +651,7 @@ func testCreateCheckFails(t *testing.T, ctx context.Context, root string, opts G
 	t.Helper()
 	broken := errors.New("python --version failed")
 	orig := checkGoombaEnvironment
-	checkGoombaEnvironment = func(*PythonEnvironment, Version) error { return broken }
+	checkGoombaEnvironment = func(context.Context, *PythonEnvironment, Version) error { return broken }
 	var calls []string
 	_, err := CreateEnvironmentGoombaWithOptions(ctx, "badcheck", root, opts, func(msg string, current, total int64) { calls = append(calls, msg) })
 	checkGoombaEnvironment = orig
@@ -686,9 +686,9 @@ func testCheckResolvedPrefix(t *testing.T, ctx context.Context, ch *refChannel, 
 	}
 	var checked string
 	orig := checkGoombaEnvironment
-	checkGoombaEnvironment = func(e *PythonEnvironment, v Version) error {
+	checkGoombaEnvironment = func(ctx context.Context, e *PythonEnvironment, v Version) error {
 		checked = e.PythonPath
-		err := orig(e, v)
+		err := orig(ctx, e, v)
 		e.PythonLibPath = "" // as the check reports a missing libpython
 		return err
 	}
