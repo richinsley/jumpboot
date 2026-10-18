@@ -61,8 +61,8 @@ var (
 	ErrBackendUnsupported = errors.New("operation not supported by the environment's backend")
 )
 
-// defaultGoombaTimeout bounds resolving plus installing when
-// GoombaOptions.Timeout is zero.
+// defaultGoombaTimeout bounds resolving plus installing (and a restore's
+// pip step) when GoombaOptions.Timeout is zero.
 const defaultGoombaTimeout = 10 * time.Minute
 
 // goombaHostOS is the operating system the goomba functions check for
@@ -123,8 +123,10 @@ type GoombaOptions struct {
 	// https://conda.anaconda.org.
 	ChannelAlias string
 
-	// Timeout bounds resolving plus installing; 0 means 10 minutes. It
-	// applies on top of the caller's context.
+	// Timeout bounds resolving plus installing, and for
+	// CreateEnvironmentFromJSONFileGoomba the pip step too; 0 means 10
+	// minutes. It applies on top of the caller's context. Raise it for
+	// large pip installs.
 	Timeout time.Duration
 
 	// Client performs every download (channel indexes and package
@@ -221,14 +223,18 @@ func goombaOptionsFor(pythonVersion, channel string) GoombaOptions {
 //     user's own environments, where micromamba reuses any it can run.
 //
 // Either way, the Python and pip versions are checked as
-// CreateEnvironmentMamba checks them. The environment's Backend is
+// CreateEnvironmentMamba checks them. For a new environment the check runs
+// inside goomba's transaction (InstallOptions.BeforeCommit), on the
+// interpreter at the path goomba resolved: if it fails, the installation
+// is rolled back and nothing is left. The environment's Backend is
 // BackendGoomba and its MicromambaPath is empty.
 //
 // progressCallback, if not nil, receives the progress: "Loading channel
 // index" (channels), "Solving environment", "Fetching packages" (bytes,
 // total -1 when unknown), "Linking packages" (packages), "Compiling Python
-// files" (files) and "Python environment created successfully". It is
-// never called concurrently and not called once ctx is done; it must
+// files" (files), "Checking the environment", and, once goomba has
+// committed the environment, "Python environment created successfully". It
+// is never called concurrently and not called once ctx is done; it must
 // return quickly, because the installation waits for it (and the timeout
 // keeps running).
 //
@@ -247,14 +253,20 @@ func CreateEnvironmentGoombaWithOptions(ctx context.Context, envName, rootDir st
 		return nil, err
 	}
 	if !exists {
+		// The checks run inside goomba's transaction: an environment that
+		// fails them is rolled back, never left looking finished.
 		j.env.IsNew = true
-		if err := j.create(ctx, goombaSpecs(j.opts.PythonVersion, j.opts.Specs), nil); err != nil {
+		j.progress.beforeCommit = "Checking the environment"
+		check := func(_ context.Context, prefix string) error { return j.checkAt(prefix) }
+		if err := j.create(ctx, goombaSpecs(j.opts.PythonVersion, j.opts.Specs), nil, check); err != nil {
 			return nil, fmt.Errorf("error creating environment: %w", err)
 		}
+		j.finish()
 		j.progress.say("Python environment created successfully", 100, 100)
+		return j.env, nil
 	}
 	setCondaEnvPaths(j.env, runtime.GOOS, j.requested)
-	if err := checkCondaEnvironment(j.env, j.requested); err != nil {
+	if err := checkGoombaEnvironment(j.env, j.requested); err != nil {
 		return nil, err
 	}
 	return j.env, nil
@@ -304,17 +316,18 @@ func CreateEnvironmentGoombaWithOptions(ctx context.Context, envName, rootDir st
 //     local installs, editable ones, ===). Without Packages, the legacy
 //     PipPackages are installed. (CreateEnvironmentFromJSONFileWithOptions
 //     ignores PipPackages whenever Packages is not empty, so it drops those
-//     lines.) The pip step runs after ctx and gopts.Timeout, which cover
-//     resolving and installing the conda packages, and ignores them.
-//   - While the new environment is checked and the pip step runs, the
-//     environment is locked as goomba locks it during an installation, so
-//     that other callers see it as busy (goomba.ErrPrefixLocked) rather
-//     than reusing an environment whose pip step may still fail. If the
-//     lock cannot be taken, the restore goes on without it.
-//   - If the check or the pip step fails, the environment is left in
-//     place, with its conda packages installed; the error says so and
-//     where. Remove the directory before retrying: a retry fails with
-//     goomba.ErrPrefixNotEmpty.
+//     lines.)
+//   - The check of the new environment and the pip step run inside goomba's
+//     transaction (InstallOptions.BeforeCommit), under its lock and before
+//     it commits: until pip has finished, everybody else sees the
+//     environment as busy (goomba.ErrPrefixLocked) and nobody can reuse
+//     it. If the check or pip fails, or ctx is done (pip's whole process
+//     group is then killed), the whole installation is rolled back: nothing
+//     is left, and a retry starts afresh. "Installing pip packages" is
+//     reported when the step starts, "Python environment created
+//     successfully" once goomba has committed.
+//   - gopts.Timeout covers resolving, installing and the pip step
+//     together: raise it for large pip installs.
 //
 // gopts otherwise applies as for CreateEnvironmentGoombaWithOptions. On
 // Windows it fails with ErrBackendUnsupported before reading filePath.
@@ -355,37 +368,33 @@ func CreateEnvironmentFromJSONFileGoomba(ctx context.Context, filePath, rootDir 
 	}
 	j.env.IsNew = true
 	verify := func(lf *lock.Lockfile) error { return verifyRestore(&es, lf, ropts) }
-	if err := j.create(ctx, goombaSpecs(j.opts.PythonVersion, j.opts.Specs), verify); err != nil {
+	// The checks and the pip step run inside goomba's transaction, under
+	// its lock: nobody can reuse the environment before pip finished, and
+	// a failure or cancellation rolls everything back.
+	pins, rest := restorePipPlan(&es)
+	j.progress.beforeCommit = "Checking the environment"
+	if len(pins) > 0 || len(rest) > 0 {
+		j.progress.beforeCommit = "Installing pip packages"
+	}
+	finish := func(hctx context.Context, prefix string) error {
+		if err := j.checkAt(prefix); err != nil {
+			return err
+		}
+		return restorePipPackages(hctx, j.checked, &es, progressCallback)
+	}
+	if err := j.create(ctx, goombaSpecs(j.opts.PythonVersion, j.opts.Specs), verify, finish); err != nil {
 		var u *solve.Unsolvable
 		if errors.As(err, &u) && len(j.opts.Channels) > 1 {
 			return nil, fmt.Errorf("error creating environment: %w (the specification lists %d channels, which the goomba restore uses in strict priority in the order listed; FreezeToFile does not record that order, so check it)", err, len(j.opts.Channels))
 		}
 		return nil, fmt.Errorf("error creating environment: %w", err)
 	}
-	// From here to the end of the pip step, hold the lock goomba holds
-	// while it installs, so that other callers see a busy environment
-	// instead of reusing one whose pip step may still fail. Someone may
-	// have taken it in the moment since goomba released it; then go on
-	// without it.
-	if restoreAfterInstallHook != nil {
-		restoreAfterInstallHook(j.prefix)
-	}
-	if unlock, err := lockEnvDir(j.prefix); err == nil {
-		defer unlock()
-	}
+	j.finish()
 	j.progress.say("Python environment created successfully", 100, 100)
-	env := j.env
-	setCondaEnvPaths(env, runtime.GOOS, j.requested)
-	if err := checkCondaEnvironment(env, j.requested); err != nil {
-		return nil, leftInPlace(j.prefix, "checking the new environment", err)
-	}
-	if err := restorePipPackages(env, &es, progressCallback); err != nil {
-		return nil, leftInPlace(j.prefix, "the pip step", err)
-	}
 	if progressCallback != nil {
 		progressCallback("Finished creating environment from JSON file", 100, 100)
 	}
-	return env, nil
+	return j.env, nil
 }
 
 // checkStrictSpec applies, before anything is resolved, the part of
@@ -429,48 +438,46 @@ func restorePythonVersion(es *EnvironmentSpec, fallback string) string {
 	return fallback
 }
 
-// restoreAfterInstallHook, if set, runs in CreateEnvironmentFromJSONFileGoomba
-// between goomba's installation and taking the environment's lock; tests
-// use it to take the lock first.
-var restoreAfterInstallHook func(prefix string)
-
-// leftInPlace explains a restore that failed after the conda packages were
-// installed: the environment stays where it is.
-func leftInPlace(prefix, stage string, cause error) error {
-	return fmt.Errorf("%w (the conda packages are installed, but %s failed; the environment is left at %s: remove it before retrying, or a retry fails with goomba.ErrPrefixNotEmpty)", cause, stage, prefix)
+// restorePipPlan returns the pip work of a restore of es. With Packages:
+// its packages with Source "pip", installed one at a time as
+// CreateEnvironmentFromJSONFileWithOptions installs them, then the legacy
+// PipPackages lines that none of them names (by normalised name), in
+// order, which are the lines a freeze cannot pin as name==version. Without
+// Packages: the legacy PipPackages.
+func restorePipPlan(es *EnvironmentSpec) (pins []PackageSpec, rest []string) {
+	if len(es.Packages) == 0 {
+		return nil, es.PipPackages
+	}
+	pinned := map[string]bool{}
+	for _, pkg := range es.Packages {
+		if pkg.Source == "pip" {
+			pins = append(pins, pkg)
+			pinned[normalizePipName(pkg.Name)] = true
+		}
+	}
+	for _, line := range es.PipPackages {
+		if name := pipLineName(line); name == "" || !pinned[name] {
+			rest = append(rest, line)
+		}
+	}
+	return pins, rest
 }
 
-// restorePipPackages installs the pip packages of es into env. With
-// Packages: its packages with Source "pip", one at a time, as
-// CreateEnvironmentFromJSONFileWithOptions does; then the legacy
-// PipPackages lines that none of them names, in order, which are the lines
-// a freeze cannot pin as name==version. Without Packages: the legacy
-// PipPackages.
-func restorePipPackages(env *PythonEnvironment, es *EnvironmentSpec, progressCallback ProgressCallback) error {
-	rest := es.PipPackages
-	if len(es.Packages) > 0 {
-		pinned := map[string]bool{}
-		for _, pkg := range es.Packages {
-			if pkg.Source != "pip" {
-				continue
-			}
-			pinned[normalizePipName(pkg.Name)] = true
-			if err := env.PipInstallPackage(pkg.Name+"=="+pkg.Version, "https://pypi.org/simple", "", true, progressCallback); err != nil {
-				return fmt.Errorf("error installing pip package %s: %w", pkg.Name, err)
-			}
-			if progressCallback != nil {
-				progressCallback(fmt.Sprintf("Installing package %s...", pkg.Name), 50, 100)
-			}
+// restorePipPackages installs the pip packages of es into env, as
+// restorePipPlan lists them, with pip stopped (its whole process group)
+// when ctx is done.
+func restorePipPackages(ctx context.Context, env *PythonEnvironment, es *EnvironmentSpec, progressCallback ProgressCallback) error {
+	pins, rest := restorePipPlan(es)
+	for _, pkg := range pins {
+		if err := pipInstallContext(ctx, env, []string{pkg.Name + "==" + pkg.Version}, "https://pypi.org/simple", "", true, progressCallback); err != nil {
+			return fmt.Errorf("error installing pip package %s: %w", pkg.Name, err)
 		}
-		rest = nil
-		for _, line := range es.PipPackages {
-			if name := pipLineName(line); name == "" || !pinned[name] {
-				rest = append(rest, line)
-			}
+		if progressCallback != nil {
+			progressCallback(fmt.Sprintf("Installing package %s...", pkg.Name), 50, 100)
 		}
 	}
 	if len(rest) > 0 {
-		if err := env.PipInstallPackages(rest, "https://pypi.org/simple", "", true, progressCallback); err != nil {
+		if err := pipInstallContext(ctx, env, rest, "https://pypi.org/simple", "", true, progressCallback); err != nil {
 			return fmt.Errorf("error installing pip packages: %w", err)
 		}
 	}
@@ -502,6 +509,36 @@ type goombaJob struct {
 	absRoot   string             // rootDir made absolute
 	prefix    string             // the environment's absolute path
 	progress  *goombaProgress
+	// checked is the environment at goomba's resolved prefix, as checkAt
+	// checked it inside the transaction.
+	checked *PythonEnvironment
+}
+
+// checkGoombaEnvironment runs the checks CreateEnvironmentMamba runs on an
+// environment; tests replace it.
+var checkGoombaEnvironment = checkCondaEnvironment
+
+// checkAt checks the new environment at prefix, the resolved path goomba
+// installs into, from inside goomba's transaction, and keeps the result
+// for finish.
+func (j *goombaJob) checkAt(prefix string) error {
+	e := &PythonEnvironment{}
+	setCondaEnvPathsAt(e, prefix, runtime.GOOS, j.requested)
+	if err := checkGoombaEnvironment(e, j.requested); err != nil {
+		return err
+	}
+	j.checked = e
+	return nil
+}
+
+// finish fills the paths of the committed environment as the caller named
+// it (rootDir/envs/NAME) and the results of checkAt.
+func (j *goombaJob) finish() {
+	setCondaEnvPaths(j.env, runtime.GOOS, j.requested)
+	j.env.PythonVersion, j.env.PipVersion = j.checked.PythonVersion, j.checked.PipVersion
+	if j.checked.PythonLibPath == "" {
+		j.env.PythonLibPath = ""
+	}
 }
 
 // newGoombaJob checks the request and prepares rootDir as
@@ -637,13 +674,15 @@ func RemoveIncompleteEnvironment(envName, rootDir string) error {
 
 // create resolves specs and installs the result into the job's prefix
 // within the job's timeout. verify, if not nil, checks the lockfile after
-// resolving and before anything is installed.
-func (j *goombaJob) create(ctx context.Context, specs []string, verify func(*lock.Lockfile) error) error {
+// resolving and before anything is installed; beforeCommit, if not nil,
+// runs inside goomba's transaction (InstallOptions.BeforeCommit), within
+// the timeout too.
+func (j *goombaJob) create(ctx context.Context, specs []string, verify func(*lock.Lockfile) error, beforeCommit func(context.Context, string) error) error {
 	tctx, cancel := context.WithTimeout(ctx, j.opts.Timeout)
 	defer cancel()
 	j.progress.setContext(tctx)
 	defer j.progress.setContext(ctx)
-	err := j.lockAndInstall(tctx, specs, verify)
+	err := j.lockAndInstall(tctx, specs, verify, beforeCommit)
 	if err != nil && errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
 		return fmt.Errorf("timed out after %v (GoombaOptions.Timeout): %w", j.opts.Timeout, err)
 	}
@@ -652,8 +691,9 @@ func (j *goombaJob) create(ctx context.Context, specs []string, verify func(*loc
 
 // lockAndInstall is goomba.Create done in its two steps, goomba.Lock and
 // goomba.InstallLock, so that the lockfile can be verified and its archive
-// sizes reported before the installation starts.
-func (j *goombaJob) lockAndInstall(ctx context.Context, specs []string, verify func(*lock.Lockfile) error) error {
+// sizes reported before the installation starts. beforeCommit becomes
+// InstallOptions.BeforeCommit.
+func (j *goombaJob) lockAndInstall(ctx context.Context, specs []string, verify func(*lock.Lockfile) error, beforeCommit func(context.Context, string) error) error {
 	pkgsDir := filepath.Join(j.absRoot, "goomba", "pkgs")
 	repodataDir := filepath.Join(j.absRoot, "goomba", "repodata")
 	for _, d := range []string{pkgsDir, repodataDir} {
@@ -662,10 +702,11 @@ func (j *goombaJob) lockAndInstall(ctx context.Context, specs []string, verify f
 		}
 	}
 	inst := goomba.InstallOptions{
-		PkgsDir:    pkgsDir,
-		Client:     j.opts.Client,
-		CompilePyc: !j.opts.NoPyc,
-		Progress:   j.progress.installEvent,
+		PkgsDir:      pkgsDir,
+		Client:       j.opts.Client,
+		CompilePyc:   !j.opts.NoPyc,
+		Progress:     j.progress.installEvent,
+		BeforeCommit: beforeCommit,
 	}
 	lo := goomba.LockOptions{
 		Specs:        specs,
@@ -967,6 +1008,9 @@ type goombaProgress struct {
 	cb  ProgressCallback
 	ctx context.Context // nil means never done
 
+	// beforeCommit is reported for EventBeforeCommit, if not "".
+	beforeCommit string
+
 	sizes      map[string]int64 // archive size by "name-version-build"
 	bytesTotal int64            // sum of sizes, or -1 when one is unknown
 	bytesDone  int64
@@ -1041,5 +1085,9 @@ func (p *goombaProgress) installEvent(e goomba.Event) {
 		p.report("Compiling Python files", 0, e.Total)
 	case goomba.EventCompiled:
 		p.report("Compiling Python files", e.Done, e.Total)
+	case goomba.EventBeforeCommit:
+		if p.beforeCommit != "" {
+			p.report(p.beforeCommit, 0, -1)
+		}
 	}
 }

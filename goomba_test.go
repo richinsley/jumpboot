@@ -758,7 +758,7 @@ func TestGoombaFreezeThroughAllRestores(t *testing.T) {
 	}
 	pipCalls := restoreLog(func(root string) error {
 		e := &PythonEnvironment{PipPath: filepath.Join(root, "envs", "e", "bin", "pip")}
-		return restorePipPackages(e, &es, nil)
+		return restorePipPackages(context.Background(), e, &es, nil)
 	})
 	wantCalls("goomba", pipCalls, "requests==2.31.0", "packaging==26.0")
 }
@@ -834,6 +834,9 @@ func TestGoombaProgress(t *testing.T) {
 	p.installEvent(goomba.Event{Kind: goomba.EventLinked, Package: "b-2-0", Done: 1, Total: 2})
 	p.installEvent(goomba.Event{Kind: goomba.EventCompiling, Total: 10})
 	p.installEvent(goomba.Event{Kind: goomba.EventCompiled, Done: 9, Total: 10})
+	p.installEvent(goomba.Event{Kind: goomba.EventBeforeCommit, Done: 2, Total: 2}) // no message set: not reported
+	p.beforeCommit = "Checking the environment"
+	p.installEvent(goomba.Event{Kind: goomba.EventBeforeCommit, Done: 2, Total: 2})
 	p.installEvent(goomba.Event{Kind: goomba.EventDone, Done: 2, Total: 2}) // not reported
 	want := []call{
 		{"Loading channel index", 1, 1},
@@ -845,6 +848,7 @@ func TestGoombaProgress(t *testing.T) {
 		{"Linking packages", 2, 2},
 		{"Compiling Python files", 0, 10},
 		{"Compiling Python files", 9, 10},
+		{"Checking the environment", 0, -1},
 	}
 	if !reflect.DeepEqual(calls, want) {
 		t.Errorf("calls:\n got %v\nwant %v", calls, want)
@@ -1059,7 +1063,7 @@ func TestRestorePipPackages(t *testing.T) {
 			"legacy==1.0",
 		},
 	}
-	if err := restorePipPackages(env, es, nil); err != nil {
+	if err := restorePipPackages(context.Background(), env, es, nil); err != nil {
 		t.Fatal(err)
 	}
 	lines := strings.Split(strings.TrimSpace(read(logf)), "\n")
@@ -1081,7 +1085,7 @@ func TestRestorePipPackages(t *testing.T) {
 	}
 	// Without Packages: the legacy list, in one call.
 	env, logf = loggingPip(t)
-	if err := restorePipPackages(env, &EnvironmentSpec{PipPackages: []string{"a==1", "b==2"}}, nil); err != nil {
+	if err := restorePipPackages(context.Background(), env, &EnvironmentSpec{PipPackages: []string{"a==1", "b==2"}}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if got := read(logf); strings.Count(got, "install ") != 1 || !strings.Contains(got, " a==1 b==2 ") {

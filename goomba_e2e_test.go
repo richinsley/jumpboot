@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -279,7 +280,12 @@ func TestGoombaEndToEndOffline(t *testing.T) {
 	if l := progress.last["Linking packages"]; l[0] <= 0 || l[0] != l[1] {
 		t.Errorf("last link progress %v", l)
 	}
-	for _, msg := range []string{"Loading channel index", "Solving environment", "Fetching packages", "Linking packages", "Python environment created successfully"} {
+	// "created successfully" comes last, after the check inside goomba's
+	// transaction.
+	if n := len(progress.calls); n < 2 || progress.calls[n-1] != "Python environment created successfully" || progress.calls[n-2] != "Checking the environment" {
+		t.Errorf("progress ends %q, want the check, then created successfully", progress.calls)
+	}
+	for _, msg := range []string{"Loading channel index", "Solving environment", "Fetching packages", "Linking packages", "Checking the environment", "Python environment created successfully"} {
 		if _, ok := progress.last[msg]; !ok {
 			t.Errorf("no %q progress", msg)
 		}
@@ -452,26 +458,35 @@ func TestGoombaEndToEndOffline(t *testing.T) {
 		}
 	}
 
-	// A failing pip step leaves the environment, with its conda packages,
-	// where it is, and says so; a retry then finds it in its way.
+	// A failing pip step rolls the whole installation back: nothing is
+	// left, and a retry starts afresh (and fails the same way).
 	pipFail := filepath.Join(t.TempDir(), "pipfail.json")
 	writeJSON(t, pipFail, EnvironmentSpec{Name: "pipfail", PythonVersion: "3.11", Channels: []string{ch.url},
 		Packages: []PackageSpec{pinned(python311), {Name: "--jumpboot-no-such-option", Version: "1", Source: "pip"}}})
-	pipFailEnv := filepath.Join(root, "envs", "pipfail")
-	_, err = CreateEnvironmentFromJSONFileGoomba(ctx, pipFail, root, RestoreOptions{}, GoombaOptions{Client: ch.srv.Client()}, nil)
-	if err == nil || !strings.Contains(err.Error(), "error installing pip package") || !strings.Contains(err.Error(), "the pip step failed; the environment is left at "+pipFailEnv) {
-		t.Errorf("pip failure: err = %v", err)
-	}
-	if err := goomba.CheckComplete(pipFailEnv); err != nil {
-		t.Errorf("pip failure: the environment is not a finished, unlocked one: %v", err)
-	}
-	if _, err := CreateEnvironmentFromJSONFileGoomba(ctx, pipFail, root, RestoreOptions{}, GoombaOptions{Client: ch.srv.Client()}, nil); !errors.Is(err, goomba.ErrPrefixNotEmpty) {
-		t.Errorf("pip failure, retry: err = %v, want goomba.ErrPrefixNotEmpty", err)
+	for try := 1; try <= 2; try++ {
+		var calls []string
+		_, err := CreateEnvironmentFromJSONFileGoomba(ctx, pipFail, root, RestoreOptions{}, GoombaOptions{Client: ch.srv.Client()},
+			func(msg string, current, total int64) { calls = append(calls, msg) })
+		if err == nil || !strings.Contains(err.Error(), "before commit: error installing pip package") {
+			t.Errorf("pip failure, try %d: err = %v", try, err)
+		}
+		if _, err := os.Lstat(filepath.Join(root, "envs", "pipfail")); !os.IsNotExist(err) {
+			t.Errorf("pip failure, try %d: the environment was left (%v)", try, err)
+		}
+		if slices.Contains(calls, "Python environment created successfully") || !slices.Contains(calls, "Installing pip packages") {
+			t.Errorf("pip failure, try %d: progress %q", try, calls)
+		}
 	}
 
-	// While the restore checks the new environment and runs pip, the
-	// environment is busy for everybody else.
-	testRestoreLock(t, ctx, root, ch, opts, python311)
+	// Calo's regression: between the conda packages' installation and the
+	// end of pip, nobody can observe or reuse the environment.
+	testRestoreExclusive(t, ctx, root, ch, opts, python311)
+	// A restore cancelled during pip leaves nothing, and a retry works.
+	testRestoreCancelled(t, ctx, root, ch, python311)
+	// A create whose check inside the transaction fails leaves nothing.
+	testCreateCheckFails(t, ctx, root, opts)
+	// The check runs on the interpreter at the path goomba resolved.
+	testCheckResolvedPrefix(t, ctx, ch, opts)
 
 	testChannelOrderHint(t, ctx, ch, python311)
 
@@ -537,5 +552,152 @@ func testChannelOrderHint(t *testing.T, ctx context.Context, ref *refChannel, py
 	var u *solve.Unsolvable
 	if !errors.As(err, &u) || !strings.Contains(err.Error(), "lists 2 channels") {
 		t.Errorf("channels in the wrong order: err = %v, want *solve.Unsolvable mentioning the channel order", err)
+	}
+}
+
+// satisfiedPip returns a pip package of the test environment that pip
+// reports as already satisfied (conda installed it), so a restore's pip
+// step runs pip, and calls back, without any index.
+func satisfiedPip(t *testing.T, ref *refChannel) PackageSpec {
+	t.Helper()
+	pk := ref.entry(t, "packaging")
+	return PackageSpec{Name: "packaging", Version: pk["version"].(string), Source: "pip"}
+}
+
+// testRestoreExclusive checks, from a pip progress callback inside the
+// restore's pip step, that a concurrent create, restore, CheckComplete and
+// RemoveIncompleteEnvironment of the same environment all find it busy, and
+// that it is reused normally once the restore returned.
+func testRestoreExclusive(t *testing.T, ctx context.Context, root string, ch *refChannel, opts GoombaOptions, python map[string]any) {
+	t.Helper()
+	name := "exclusive"
+	prefix := filepath.Join(root, "envs", name)
+	spec := filepath.Join(t.TempDir(), name+".json")
+	writeJSON(t, spec, EnvironmentSpec{Name: name, Channels: []string{ch.url}, Packages: []PackageSpec{pinned(python), satisfiedPip(t, ch)}})
+	var calls []string
+	var during map[string]error
+	_, err := CreateEnvironmentFromJSONFileGoomba(ctx, spec, root, RestoreOptions{}, GoombaOptions{Client: ch.srv.Client()}, func(msg string, current, total int64) {
+		calls = append(calls, msg)
+		if strings.HasPrefix(msg, "Installing pip package packaging") && during == nil {
+			// Another caller, now: the conda packages are installed, pip
+			// is running.
+			_, createErr := CreateEnvironmentGoombaWithOptions(ctx, name, root, opts, nil)
+			_, restoreErr := CreateEnvironmentFromJSONFileGoomba(ctx, spec, root, RestoreOptions{}, GoombaOptions{Client: ch.srv.Client()}, nil)
+			during = map[string]error{
+				"create":                      createErr,
+				"restore":                     restoreErr,
+				"CheckComplete":               goomba.CheckComplete(prefix),
+				"RemoveIncompleteEnvironment": RemoveIncompleteEnvironment(name, root),
+			}
+		}
+		if msg == "Python environment created successfully" {
+			// Only after goomba committed.
+			if err := goomba.CheckComplete(prefix); err != nil {
+				t.Errorf("at %q the environment is not committed: %v", msg, err)
+			}
+		}
+	})
+	if err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if during == nil {
+		t.Fatalf("pip never reported progress: %q", calls)
+	}
+	for what, err := range during {
+		if !errors.Is(err, goomba.ErrPrefixLocked) {
+			t.Errorf("%s during the pip step: err = %v, want goomba.ErrPrefixLocked", what, err)
+		}
+	}
+	i, j := slices.Index(calls, "Installing pip packages"), slices.Index(calls, "Python environment created successfully")
+	if i < 0 || j < i || calls[len(calls)-1] != "Finished creating environment from JSON file" {
+		t.Errorf("progress %q", calls)
+	}
+	// Once the restore returned, the environment is reused as usual.
+	env, err := CreateEnvironmentGoombaWithOptions(ctx, name, root, opts, nil)
+	if err != nil || env.IsNew {
+		t.Errorf("reuse after the restore: IsNew %v, err %v", env != nil && env.IsNew, err)
+	}
+}
+
+// testRestoreCancelled cancels a restore from a pip progress callback: the
+// installation is rolled back, and a retry succeeds.
+func testRestoreCancelled(t *testing.T, ctx context.Context, root string, ch *refChannel, python map[string]any) {
+	t.Helper()
+	spec := filepath.Join(t.TempDir(), "cancelled.json")
+	writeJSON(t, spec, EnvironmentSpec{Name: "cancelled", Channels: []string{ch.url}, Packages: []PackageSpec{pinned(python), satisfiedPip(t, ch)}})
+	cctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	_, err := CreateEnvironmentFromJSONFileGoomba(cctx, spec, root, RestoreOptions{}, GoombaOptions{Client: ch.srv.Client()}, func(msg string, current, total int64) {
+		if strings.HasPrefix(msg, "Installing pip package packaging") {
+			cancel()
+		}
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("cancelled restore: err = %v, want context.Canceled", err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, "envs", "cancelled")); !os.IsNotExist(err) {
+		t.Errorf("the cancelled restore left an environment (%v)", err)
+	}
+	env, err := CreateEnvironmentFromJSONFileGoomba(ctx, spec, root, RestoreOptions{}, GoombaOptions{Client: ch.srv.Client()}, nil)
+	if err != nil || !env.IsNew {
+		t.Errorf("retry after the cancellation: err %v", err)
+	}
+}
+
+// testCreateCheckFails makes the check inside the transaction fail (as a
+// broken python --version would): the create leaves nothing, never
+// reports success, and the next create works.
+func testCreateCheckFails(t *testing.T, ctx context.Context, root string, opts GoombaOptions) {
+	t.Helper()
+	broken := errors.New("python --version failed")
+	orig := checkGoombaEnvironment
+	checkGoombaEnvironment = func(*PythonEnvironment, Version) error { return broken }
+	var calls []string
+	_, err := CreateEnvironmentGoombaWithOptions(ctx, "badcheck", root, opts, func(msg string, current, total int64) { calls = append(calls, msg) })
+	checkGoombaEnvironment = orig
+	if !errors.Is(err, broken) {
+		t.Errorf("failing check: err = %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, "envs", "badcheck")); !os.IsNotExist(err) {
+		t.Errorf("the failed create left an environment (%v)", err)
+	}
+	if slices.Contains(calls, "Python environment created successfully") || !slices.Contains(calls, "Checking the environment") {
+		t.Errorf("failing check: progress %q", calls)
+	}
+	if env, err := CreateEnvironmentGoombaWithOptions(ctx, "badcheck", root, opts, nil); err != nil || !env.IsNew {
+		t.Errorf("create after the failed check: err %v", err)
+	}
+}
+
+// testCheckResolvedPrefix creates under a symlinked root: the check inside
+// the transaction runs the interpreter at goomba's resolved prefix, and
+// the environment returned keeps the root as given.
+func testCheckResolvedPrefix(t *testing.T, ctx context.Context, ch *refChannel, opts GoombaOptions) {
+	t.Helper()
+	real := t.TempDir()
+	link := filepath.Join(t.TempDir(), "rootlink")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	realResolved, err := filepath.EvalSymlinks(real)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var checked string
+	orig := checkGoombaEnvironment
+	checkGoombaEnvironment = func(e *PythonEnvironment, v Version) error {
+		checked = e.PythonPath
+		return orig(e, v)
+	}
+	env, err := CreateEnvironmentGoombaWithOptions(ctx, "linked", link, opts, nil)
+	checkGoombaEnvironment = orig
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(realResolved, "envs", "linked", "bin", "python"); checked != want {
+		t.Errorf("checked %q, want the resolved %q", checked, want)
+	}
+	if want := filepath.Join(link, "envs", "linked", "bin", "python"); env.PythonPath != want {
+		t.Errorf("PythonPath %q, want %q", env.PythonPath, want)
 	}
 }
