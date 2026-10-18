@@ -15,8 +15,10 @@ import (
 	"time"
 
 	"github.com/richinsley/goomba"
+	"github.com/richinsley/goomba/fetch"
 	"github.com/richinsley/goomba/lock"
 	"github.com/richinsley/goomba/record"
+	"github.com/richinsley/goomba/repodata"
 	"github.com/richinsley/goomba/spec"
 )
 
@@ -637,4 +639,37 @@ func TestGoombaProgress(t *testing.T) {
 
 	// A nil callback is fine.
 	(&goombaProgress{}).installEvent(goomba.Event{Kind: goomba.EventCompiling, Total: 1})
+}
+
+func TestGoombaUnsafeCaches(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("goomba checks cache ownership on Unix only")
+	}
+	// Nothing listens on port 1 of the loopback address: if goomba got as
+	// far as the network, the error would not be the cache's.
+	opts := GoombaOptions{PythonVersion: "3.11", Channels: []string{"https://127.0.0.1:1/none"}, Timeout: time.Minute}
+	for _, tc := range []struct {
+		dir  string
+		want error
+	}{
+		{"pkgs", fetch.ErrUnsafeCache},
+		{"repodata", repodata.ErrUnsafeCache},
+	} {
+		root := t.TempDir()
+		for _, d := range []string{"pkgs", "repodata"} {
+			if err := os.MkdirAll(filepath.Join(root, "goomba", d), 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.Chmod(filepath.Join(root, "goomba", tc.dir), 0o777); err != nil {
+			t.Fatal(err)
+		}
+		_, err := CreateEnvironmentGoombaWithOptions(context.Background(), "e", root, opts, nil)
+		if !errors.Is(err, tc.want) {
+			t.Errorf("goomba/%s writable by others: err = %v, want %v", tc.dir, err, tc.want)
+		}
+		if _, err := os.Lstat(filepath.Join(root, "envs", "e")); !os.IsNotExist(err) {
+			t.Errorf("goomba/%s: an environment was left (%v)", tc.dir, err)
+		}
+	}
 }
