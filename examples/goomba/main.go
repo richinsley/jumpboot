@@ -24,6 +24,7 @@ func main() {
 	version := "3.12"
 
 	// Ctrl-C cancels the creation; goomba then removes what it installed.
+	// goomba runs on Linux and macOS; on Windows use CreateEnvironmentMamba.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
@@ -40,6 +41,8 @@ func main() {
 		Channels:      []string{"conda-forge"},
 		Timeout:       15 * time.Minute,
 	}, progress)
+	// From here on Ctrl-C has its usual effect again.
+	stop()
 	var unsolvable *solve.Unsolvable
 	switch {
 	case errors.As(err, &unsolvable):

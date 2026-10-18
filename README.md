@@ -164,17 +164,22 @@ env, err := jumpboot.CreateEnvironmentGoombaWithOptions(ctx, "myenv", "./envs", 
 | | micromamba | goomba |
 |---|---|---|
 | Functions | `CreateEnvironmentMamba`, `CreateEnvironmentFromJSONFile[WithOptions]` | `CreateEnvironmentGoomba`, `CreateEnvironmentGoombaWithOptions`, `CreateEnvironmentFromJSONFileGoomba` |
-| Needs | A download of micromamba from GitHub into `rootDir/bin` on first use | Nothing beyond your program; the only process it runs is the new environment's Python, to byte-compile packages |
+| Platforms | Linux, macOS, Windows | Linux and macOS. On Windows every goomba function fails with `ErrBackendUnsupported` before doing anything (goomba cannot install entry-point launchers such as `pip.exe` yet) |
+| Needs | A download of micromamba from GitHub into `rootDir/bin` on first use | No micromamba. goomba downloads the channel indexes and packages over HTTPS, may run `nvidia-smi` and `getconf` from fixed system locations to detect virtual packages, and runs the new environment's Python to byte-compile packages; jumpboot then runs python and pip to check the environment, as for micromamba |
 | Configuration | `.condarc`, `MAMBA_*` and `CONDA_OVERRIDE_*` variables, proxies from the environment | No configuration files or environment variables: everything comes from `GoombaOptions` (`VirtualOverrides` replaces `CONDA_OVERRIDE_*`) |
 | Proxies | `HTTPS_PROXY` and friends | Only through `GoombaOptions.Client` |
 | Defaults | Python 3.10 | Python 3.10, conda-forge, 10 minute timeout plus your context |
-| Channels | Names or URLs | Names or https URLs, strict priority. A mirror whose DNS name resolves to a private address is refused: name it by its IP address |
-| Caches | `rootDir/pkgs` | `rootDir/goomba/pkgs` and `rootDir/goomba/repodata`, created 0700; directories other users could write are refused |
+| Reuse | An existing `rootDir/envs/NAME` is used as it is | The same; the options (specs, channels, ...) only matter when the environment is created |
+| Channels | Names or URLs | Names or https URLs, strict priority (highest first). Refused: the `defaults` multichannel (list its channels), `file://` and `http://` channels, URLs whose host is an IPv6 literal or whose path is exactly `/t`, and a mirror whose DNS name resolves to a private address (name it by its IPv4 address) |
+| Root directory | Any writable directory | Must not be writable by other users, nor any directory above it (group-writable is fine for your own private group): goomba refuses it with `goomba.ErrUnsafePrefix` or `fetch.ErrUnsafeCache`/`repodata.ErrUnsafeCache` |
+| Caches | `rootDir/pkgs` | `rootDir/goomba/pkgs` and `rootDir/goomba/repodata`, created 0700 |
 | pip | Added to python by micromamba | Added by jumpboot as a `pip` spec unless a spec names pip |
 | Install into an existing environment | `MicromambaInstallPackage` | Not supported (`ErrBackendUnsupported`): list the packages in `GoombaOptions.Specs`, or restore from JSON |
-| JSON restore | Creates the base environment, then installs each conda package separately, trying each channel in turn; checks only that checksums are present | Solves python, pip and every conda package together, pinned exactly, on the channels in strict priority; verifies the checksums against the channel before installing anything |
-| Freeze | `micromamba list` | The environment's `conda-meta` records, with sha256 |
+| JSON restore | Creates the base environment, then installs each conda package separately, trying each channel in turn; checks only that checksums are present | Solves python, pip and every conda package together, pinned exactly, on the channels in strict priority in the order listed; verifies the checksums against the channel before installing anything, and with `Strict` refuses any solved package that has no checksum in the file. A failed pip step removes the new environment again |
+| Freeze | `micromamba list` | The environment's `conda-meta` records; the file holds the legacy lists and `Packages` (with sha256), so every restore reads it |
 | Failure | Whatever micromamba leaves behind | Rolls back. After a crash, `conda-meta/.goomba-incomplete` remains and the environment is refused (`ErrIncompleteEnvironment`) until you remove it |
+
+Neither freeze records channel priority: `Channels` lists channels in the order the packages name them. Before restoring a file with several channels with goomba, put them highest priority first; when such a restore is unsolvable, the error says so.
 
 goomba's errors are wrapped, so you can branch on them: `errors.As(err, &unsolvable)` with a `*solve.Unsolvable` for a request that has no solution (its `Explanation` is safe to print), and `errors.Is(err, goomba.ErrPrefixLocked)` for a concurrent creation of the same environment. See [examples/goomba](examples/goomba/).
 

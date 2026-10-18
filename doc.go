@@ -54,20 +54,30 @@
 //
 // goomba (CreateEnvironmentGoomba, CreateEnvironmentGoombaWithOptions,
 // CreateEnvironmentFromJSONFileGoomba) is a pure-Go conda resolver and
-// installer compiled into the program: nothing is downloaded or run except
-// the new environment's Python, which byte-compiles noarch packages. It
-// reads no configuration file and no environment variable; everything is
-// set through GoombaOptions:
+// installer compiled into the program, for Linux and macOS: on Windows the
+// goomba functions fail with ErrBackendUnsupported before doing anything.
+// No micromamba is downloaded or run: goomba downloads the channel indexes
+// and packages over HTTPS, may run nvidia-smi and getconf from fixed system
+// locations to detect virtual packages, and runs the new environment's
+// Python to byte-compile noarch packages; jumpboot then runs python and pip
+// to check the environment. goomba reads no configuration file and no
+// environment variable; everything is set through GoombaOptions, which
+// only matter when an environment is created (an existing one is reused as
+// it is):
 //   - Defaults: Python 3.10, the conda-forge channel, a 10 minute
 //     timeout (the context passed in applies too).
 //   - Proxies: none, unless GoombaOptions.Client has one (for example a
 //     transport with Proxy: http.ProxyFromEnvironment).
-//   - Channels are names or https URLs with strict priority; a channel on
-//     a public host name that resolves to a private address is refused,
-//     so name a local mirror by its address.
+//   - Channels are names or https URLs with strict priority, highest
+//     first. Refused: the "defaults" multichannel, file:// and http://
+//     channels, URLs whose host is an IPv6 literal or whose path is exactly
+//     "/t", and a channel on a public host name that resolves to a private
+//     address (name a local mirror by its IPv4 address).
+//   - The root directory and every directory above it must not be
+//     writable by other users (goomba.ErrUnsafePrefix, fetch.ErrUnsafeCache,
+//     repodata.ErrUnsafeCache), where micromamba accepts any writable root.
 //   - Caches: rootDir/goomba/pkgs and rootDir/goomba/repodata, created
-//     0700; goomba refuses cache directories that other users could change
-//     (fetch.ErrUnsafeCache, repodata.ErrUnsafeCache).
+//     0700.
 //   - pip: goomba does not add pip to python, so jumpboot adds a pip spec
 //     unless one is given.
 //   - No installs into an existing environment: MicromambaInstallPackage
@@ -75,12 +85,16 @@
 //     packages in GoombaOptions.Specs, or restore it from JSON.
 //   - JSON restore solves python, pip and all conda packages of the
 //     specification together, pinned exactly, on the channels in strict
-//     priority (the micromamba restore installs them one by one, trying
-//     each channel in turn), and verifies their checksums against the
-//     channel before installing anything (the micromamba restore only
-//     checks that they are present).
-//   - FreezeToFile reads the conda packages from conda-meta and records
-//     their sha256.
+//     priority in the order listed (the micromamba restore installs them
+//     one by one, trying each channel in turn), and verifies their
+//     checksums against the channel before installing anything (the
+//     micromamba restore only checks that they are present); with Strict,
+//     every solved package must have a checksum in the specification. No
+//     freeze records channel priority, so list several channels highest
+//     priority first.
+//   - FreezeToFile reads the conda packages from conda-meta and writes both
+//     the legacy lists and Packages with their sha256, so every restore
+//     reads the file completely.
 //   - A failed or cancelled creation is rolled back. After a crash,
 //     conda-meta/.goomba-incomplete remains, and the environment is refused
 //     with ErrIncompleteEnvironment until it is removed.
