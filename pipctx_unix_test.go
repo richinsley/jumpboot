@@ -165,3 +165,26 @@ func TestPipInstallContextEscapedOutput(t *testing.T) {
 	}
 	_ = syscall.Kill(escaped, syscall.SIGKILL)
 }
+
+// TestRestorePipPackagesHonoursContext checks that the restore's pip step
+// passes its context to pip: a deadline stops a pip that hangs.
+func TestRestorePipPackagesHonoursContext(t *testing.T) {
+	env, dir := ctxPip(t, "echo $$ > pip.pid\nsleep 60\n")
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	for _, es := range []*EnvironmentSpec{
+		{Packages: []PackageSpec{{Name: "requests", Version: "2.31.0", Source: "pip"}}},
+		{PipPackages: []string{"requests==2.31.0"}},
+	} {
+		if err := restorePipPackages(ctx, env, es, nil); !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("err = %v, want context.DeadlineExceeded", err)
+		}
+	}
+	if d := time.Since(start); d > 10*time.Second {
+		t.Errorf("took %v", d)
+	}
+	if pid := readPID(t, dir, "pip.pid"); !gone(t, pid) {
+		t.Errorf("pip (%d) still runs", pid)
+	}
+}
