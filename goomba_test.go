@@ -615,6 +615,7 @@ func TestFreezeGoombaCondaMeta(t *testing.T) {
 		// Records lock.FromPrefix refuses: a file:// URL, no sha256.
 		condaMetaRecord("file:///srv/chan", "linux-64", "foo", "1", "0", strings.Repeat("23", 32)),
 		condaMetaRecord(cf, "linux-64", "baz", "3", "0", ""),
+		condaMetaRecord(cf, "linux-64", "qux", "4", "0", "not-a-digest"),
 	},
 		// pip freeze: a pip package, conda packages (one by file URL), an
 		// editable install and a mixed-case name.
@@ -635,7 +636,7 @@ func TestFreezeGoombaCondaMeta(t *testing.T) {
 		PythonVersion: "3.11",
 		// Legacy fields, as the micromamba freeze fills them: what pip
 		// lists (packaging, pip) is left out, and so are its channels.
-		CondaPackages: []string{"bar=2=h_0", "baz=3=0", "foo=1=0", "python=3.11.15=hd63d673_0_cpython"},
+		CondaPackages: []string{"bar=2=h_0", "baz=3=0", "foo=1=0", "python=3.11.15=hd63d673_0_cpython", "qux=4=0"},
 		Channels:      []string{"https://example.org/chan", "conda-forge", "file:///srv/chan"},
 		// The freeze drops what follows '#' in a pip line, as it always has.
 		PipPackages: []string{"requests==2.31.0", "packaging==26.0", "pip", "-e git+https://example.org/x.git", "Foo_Bar==1.0"},
@@ -648,6 +649,7 @@ func TestFreezeGoombaCondaMeta(t *testing.T) {
 			{Name: "packaging", Version: "26.0", Build: "pyhcf101f3_0", SHA256: pkSum, Source: "conda"},
 			{Name: "pip", Version: "26.0.1", Build: "pyh8b19718_0", SHA256: pipSum, Source: "conda"},
 			{Name: "python", Version: "3.11.15", Build: "hd63d673_0_cpython", SHA256: pySum, Source: "conda"},
+			{Name: "qux", Version: "4", Build: "0", Source: "conda"},
 			{Name: "requests", Version: "2.31.0", Source: "pip"},
 			{Name: "packaging", Version: "26.0", Source: "pip"},
 			{Name: "Foo_Bar", Version: "1.0", Source: "pip"},
@@ -663,7 +665,7 @@ func TestFreezeGoombaCondaMeta(t *testing.T) {
 		t.Fatal(err)
 	}
 	es = readSpec(t, out)
-	if len(es.Packages) != 6 || len(es.CondaPackages) != 6 || len(es.PipPackages) != 0 {
+	if len(es.Packages) != 7 || len(es.CondaPackages) != 7 || len(es.PipPackages) != 0 {
 		t.Errorf("frozen without pip: %+v", es)
 	}
 }

@@ -328,9 +328,11 @@ func TestGoombaEndToEndOffline(t *testing.T) {
 	if python311 == nil {
 		t.Skipf("no python 3.11 in $GOOMBA_REF_ROOT/pkgs (newest: %v)", py["version"])
 	}
+	// The specifications have no python_version: the pinned python sets it
+	// (without that, python=3.10 would conflict with the pin).
 	restoreWith := func(ropts RestoreOptions, name string, pkgs ...PackageSpec) (*PythonEnvironment, error) {
 		p := filepath.Join(t.TempDir(), name+".json")
-		writeJSON(t, p, EnvironmentSpec{Name: name, PythonVersion: "3.11", Channels: []string{ch.url}, Packages: pkgs})
+		writeJSON(t, p, EnvironmentSpec{Name: name, Channels: []string{ch.url}, Packages: pkgs})
 		return CreateEnvironmentFromJSONFileGoomba(ctx, p, root, ropts, GoombaOptions{Client: ch.srv.Client()}, nil)
 	}
 	restore := func(name string, pkgs ...PackageSpec) (*PythonEnvironment, error) {
